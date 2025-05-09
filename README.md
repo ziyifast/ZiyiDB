@@ -43,7 +43,7 @@ ziyi-db/
 定义词法单元以及关键字
 - 包含常见的SQL关键字，如：select、update等
 - 包含符号关键字：=、>、<
-- 包含字段类型：INT、STRING型
+- 包含字段类型：INT、字符型
 - 包含标识符：INDENT，解析出来的SQL列名、表名
 ```go
 type TokenType string
@@ -194,8 +194,8 @@ name TEXT
 ```sql
 -- 创建表
 CREATE TABLE users (
-                       id INT PRIMARY KEY,
-                       name TEXT
+    id INT PRIMARY KEY,
+    name TEXT
 );
 
 -- 插入数据
@@ -286,7 +286,7 @@ SELECT * FROM users;    -- 应该失败
 
 1. 克隆仓库：
 ```bash
-git clone https://github.com/yourusername/ziyi-db.git
+git clone https://github.com/ziyifast/ZiyiDB.git
 cd ziyi-db
 ```
 
@@ -300,6 +300,12 @@ go mod tidy
 go build -o ZiyiDB cmd/main.go
 ./ZiyiDB
 ```
+
+运行效果：
+<img width="652" alt="image" src="https://github.com/user-attachments/assets/06ff023d-e536-45ab-9451-2ff74588abb8" />
+
+
+
 
 ## 贡献
 
