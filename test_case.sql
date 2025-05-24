@@ -1,3 +1,4 @@
+---- 第一期 基础功能测试
 -- 1. 创建表
 CREATE TABLE users (id INT PRIMARY KEY,name TEXT,age INT);
 
@@ -28,8 +29,8 @@ SELECT * FROM users WHERE age < 30;
 
 -- 6. LIKE 操作符测试
 insert into users values (6,'Alan',18);
-SELECT * FROM users WHERE name LIKE 'A%';  -- 以 A 开头
-
+-- 以 A 开头
+SELECT * FROM users WHERE name LIKE 'A%';
 
 -- 7. 更新操作测试
 -- 7.1 更新单个字段
@@ -46,7 +47,19 @@ DELETE FROM users WHERE age > 30;
 DROP TABLE users;
 
 -- 10. 验证表已删除
-SELECT * FROM users;    -- 应该失败
+-- 应该失败
+SELECT * FROM users;
+
+
+
+---- 第二期 新增对float、datetime字段，以及between and关键字的支持，以及新增对注释符的支持
+CREATE TABLE users (id INT PRIMARY KEY,name text,age INT,score FLOAT, ctime DATETIME ); -- 创建表
+INSERT INTO users VALUES (1, 'Alice', 20,89.0, '2023-07-01 12:00:00');
+INSERT INTO users VALUES (2, 'Bob', 25,98.3, '2023-07-04 12:00:00');
+select * from users where age between 21 and 28;
+select * from users where score < 90.0;
+select * from users where ctime between '2021-07-02 12:00:00' and '2023-07-05 12:00:00';
+select * from users where ctime >  '2023-07-02 12:00:00';
 
 
 

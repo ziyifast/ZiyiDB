@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"ziyi.db.com/internal/ast"
 )
 
@@ -102,6 +103,10 @@ func (b *MemoryBackend) Insert(stmt *ast.InsertStatement) error {
 			}
 		case int32:
 			row[i] = ast.Cell{Type: ast.CellTypeInt, IntValue: v}
+		case float32:
+			row[i] = ast.Cell{Type: ast.CellTypeFloat, FloatValue: v}
+		case time.Time:
+			row[i] = ast.Cell{Type: ast.CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
 		default:
 			return fmt.Errorf("Unsupported value type: %T for column '%s'", value, table.Columns[i].Name)
 		}
@@ -260,6 +265,10 @@ func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement) error {
 				table.Rows[i][colIndex] = ast.Cell{Type: ast.CellTypeInt, IntValue: v}
 			case string:
 				table.Rows[i][colIndex] = ast.Cell{Type: ast.CellTypeText, TextValue: v}
+			case float32:
+				table.Rows[i][colIndex] = ast.Cell{Type: ast.CellTypeFloat, FloatValue: v}
+			case time.Time:
+				table.Rows[i][colIndex] = ast.Cell{Type: ast.CellTypeDateTime, TimeValue: v.String()}
 			default:
 				return fmt.Errorf("Unsupported value type: %T for column '%s'", value, set.Column)
 			}
@@ -327,6 +336,18 @@ func evaluateExpression(expr ast.Expression) (interface{}, error) {
 			return nil, fmt.Errorf("Incorrect integer value: '%s'", e.Value)
 		}
 		return int32(val), nil
+	case *ast.FloatLiteral:
+		val, err := strconv.ParseFloat(e.Value, 32)
+		if err != nil {
+			return nil, fmt.Errorf("Incorrect float value: '%s'", e.Value)
+		}
+		return float32(val), nil
+	case *ast.DateTimeLiteral:
+		t, err := time.Parse("2006-01-02 15:04:05", e.Value)
+		if err != nil {
+			return nil, fmt.Errorf("Incorrect datetime value: '%s'", e.Value)
+		}
+		return t, nil
 	case *ast.StringLiteral:
 		return e.Value, nil
 	case *ast.Identifier:
@@ -416,6 +437,57 @@ func evaluateWhereCondition(expr ast.Expression, row []ast.Cell, columns []ast.C
 
 		// 执行LIKE匹配
 		return matchLikePattern(strValue, e.Pattern), nil
+	case *ast.BetweenExpression:
+		// 解析需要比较的字段（between左侧的字段）
+		colIndex, err := getColumnIndex(e.Left.(*ast.Identifier).Value, columns)
+		if err != nil {
+			return false, err
+		}
+
+		// 获取列值
+		left := row[colIndex]
+		lower, err := evaluateExpression(e.Low)
+		if err != nil {
+			return false, err
+		}
+
+		upper, err := evaluateExpression(e.High)
+		if err != nil {
+			return false, err
+		}
+
+		switch left.Type {
+		case ast.CellTypeInt:
+			leftVal := left.IntValue
+			lowerVal, lok := lower.(int32)
+			upperVal, uok := upper.(int32)
+			if !lok || !uok {
+				return false, fmt.Errorf("type mismatch in BETWEEN expression")
+			}
+			return leftVal >= lowerVal && leftVal <= upperVal, nil
+		case ast.CellTypeFloat:
+			leftVal := left.FloatValue
+			lowerVal, lok := lower.(float32)
+			upperVal, uok := upper.(float32)
+			if !lok || !uok {
+				return false, fmt.Errorf("type mismatch in BETWEEN expression")
+			}
+			return leftVal >= lowerVal && leftVal <= upperVal, nil
+		case ast.CellTypeDateTime:
+			val := left.TimeValue
+			leftVal, err := time.Parse("2006-01-02 15:04:05", val)
+			if err != nil {
+				return false, err
+			}
+			lowerVal, lok := lower.(time.Time)
+			upperVal, uok := upper.(time.Time)
+			if !lok || !uok {
+				return false, fmt.Errorf("type mismatch in BETWEEN expression")
+			}
+			return leftVal.After(lowerVal) && leftVal.Before(upperVal), nil
+		default:
+			return false, fmt.Errorf("unsupported type in BETWEEN expression")
+		}
 	default:
 		return false, fmt.Errorf("Unknown expression type: %T", expr)
 	}
@@ -446,6 +518,28 @@ func compareValues(left, right interface{}, operator string) (bool, error) {
 				return l < r, nil
 			}
 		}
+	case float32:
+		if r, ok := right.(float32); ok {
+			switch operator {
+			case "=":
+				return l == r, nil
+			case ">":
+				return l > r, nil
+			case "<":
+				return l < r, nil
+			}
+		}
+	case time.Time:
+		if r, ok := right.(time.Time); ok {
+			switch operator {
+			case "=":
+				return l.Equal(r), nil
+			case ">":
+				return l.After(r), nil
+			case "<":
+				return l.Before(r), nil
+			}
+		}
 	}
 	return false, fmt.Errorf("Cannot compare values of different types: %T and %T", left, right)
 }
@@ -462,6 +556,15 @@ func getColumnValue(expr ast.Expression, row []ast.Cell, columns []ast.ColumnDef
 					return row[i].IntValue, nil
 				case ast.CellTypeText:
 					return row[i].TextValue, nil
+				case ast.CellTypeFloat:
+					return row[i].FloatValue, nil
+				case ast.CellTypeDateTime:
+					str := row[i].TimeValue
+					val, err := time.Parse("2006-01-02 15:04:05", str)
+					if err != nil {
+						return nil, err
+					}
+					return val, nil
 				default:
 					return nil, fmt.Errorf("Unknown cell type: %v", row[i].Type)
 				}
@@ -476,9 +579,31 @@ func getColumnValue(expr ast.Expression, row []ast.Cell, columns []ast.ColumnDef
 		return int32(val), nil
 	case *ast.StringLiteral:
 		return e.Value, nil
+	case *ast.FloatLiteral:
+		val, err := strconv.ParseFloat(e.Value, 32)
+		if err != nil {
+			return nil, fmt.Errorf("Incorrect float value: '%s'", e.Value)
+		}
+		return float32(val), nil
+	case *ast.DateTimeLiteral:
+		val, err := time.Parse("2006-01-02 15:04:05", e.Value)
+		if err != nil {
+			return nil, fmt.Errorf("Incorrect datetime value: '%s'", e.Value)
+		}
+		return val, nil
 	default:
 		return nil, fmt.Errorf("Unknown expression type: %T", expr)
 	}
+}
+
+// getColumnIndex 根据列名获取列索引
+func getColumnIndex(columnName string, columns []ast.ColumnDefinition) (int, error) {
+	for i, col := range columns {
+		if col.Name == columnName {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("column '%s' not found", columnName)
 }
 
 //后续拓展新的存储引擎，如落地到文件...

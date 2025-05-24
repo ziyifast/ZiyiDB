@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -44,7 +45,10 @@ func (l *Lexer) NextToken() Token {
 	var tok Token
 	// 跳过空白字符
 	l.skipWhitespace()
-
+	// 检查是否为注释
+	if l.ch == '-' && l.peekChar() == '-' {
+		return l.readComment()
+	}
 	switch l.ch {
 	case '=':
 		tok = Token{Type: EQ, Literal: "="}
@@ -66,6 +70,10 @@ func (l *Lexer) NextToken() Token {
 		tok.Type = STRING
 		// 读取字符串字面量
 		tok.Literal = l.readString()
+		// 检查是否为时间格式
+		if _, err := time.Parse("2006-01-02 15:04:05", tok.Literal); err == nil {
+			tok.Type = DATETIME
+		}
 		return tok
 	case 0:
 		tok = Token{Type: EOF, Literal: ""}
@@ -76,11 +84,19 @@ func (l *Lexer) NextToken() Token {
 			// 将读取到的标识符转换为对应的标记类型(转换为对应tokenType)
 			tok.Type = l.lookupIdentifier(tok.Literal)
 			return tok
-		} else if isDigit(l.ch) {
-			tok.Type = INT_LIT
-			// 读取数字
-			tok.Literal = l.readNumber()
+		} else if isDigit(l.ch) || l.ch == '.' { // 支持以小数点开头的浮点数（如.123）
+			num := l.readNumber()
+			if strings.Contains(num, ".") {
+				tok.Type = FLOAT
+			} else {
+				tok.Type = INT
+			}
+			tok.Literal = num
 			return tok
+		} else if isTime(l.ch) {
+			timeValue := l.readString()
+			tok.Literal = timeValue
+			tok.Type = DATETIME
 		} else {
 			tok = Token{Type: ERROR, Literal: string(l.ch)}
 		}
@@ -106,9 +122,14 @@ func (l *Lexer) readIdentifier() string {
 	return ident.String()
 }
 
+// 读取数字：支持对浮点数的读取
 func (l *Lexer) readNumber() string {
 	var num bytes.Buffer
-	for isDigit(l.ch) {
+	hasDecimal := false
+	for (isDigit(l.ch) || (l.ch == '.' && !hasDecimal)) && l.ch != 0 {
+		if l.ch == '.' {
+			hasDecimal = true
+		}
 		num.WriteRune(l.ch)
 		l.readChar()
 	}
@@ -125,15 +146,6 @@ func (l *Lexer) readString() string {
 	}
 	l.readChar() // 跳过结束的引号
 	return str.String()
-}
-
-func (l *Lexer) peekChar() rune {
-	ch, _, err := l.reader.ReadRune()
-	if err != nil {
-		return 0
-	}
-	l.reader.UnreadRune()
-	return ch
 }
 
 // lookupIdentifier 查找标识符类型
@@ -173,8 +185,16 @@ func (l *Lexer) lookupIdentifier(ident string) TokenType {
 		return INT
 	case "TEXT":
 		return TEXT
+	case "FLOAT":
+		return FLOAT
+	case "DATETIME":
+		return DATETIME
 	case "LIKE":
 		return LIKE
+	case "BETWEEN":
+		return BETWEEN
+	case "AND":
+		return AND
 	default:
 		return IDENT
 	}
@@ -188,4 +208,35 @@ func isLetter(ch rune) bool {
 // 判断字符是否为数字
 func isDigit(ch rune) bool {
 	return unicode.IsDigit(ch)
+}
+
+// 判断是否是时间格式
+func isTime(ch rune) bool {
+	_, err := time.Parse("2006-01-02 15:04:05", string(ch))
+	return err == nil
+}
+
+// 读取注释内容
+func (l *Lexer) readComment() Token {
+	var comment bytes.Buffer
+	// 跳过两个减号，即：注释符
+	l.readChar()
+	l.readChar()
+	// 读取直到行尾
+	for l.ch != '\n' && l.ch != 0 && l.ch != '\r' {
+		comment.WriteRune(l.ch)
+		l.readChar()
+	}
+	return Token{Type: COMMENT, Literal: comment.String()}
+}
+
+// 查看下一个字符但不移动指针
+func (l *Lexer) peekChar() rune {
+	ch, _, err := l.reader.ReadRune()
+	if err != nil {
+		return 0
+	}
+	// 回退字符
+	_ = l.reader.UnreadRune()
+	return ch
 }
