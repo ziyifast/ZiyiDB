@@ -77,9 +77,11 @@ type ColumnDefinition struct {
 
 // Cell 表示单元格
 type Cell struct {
-	Type      CellType
-	IntValue  int32
-	TextValue string
+	Type       CellType
+	IntValue   int32
+	TextValue  string
+	FloatValue float32 // 用于Float
+	TimeValue  string
 }
 
 // CellType 表示单元格类型
@@ -88,6 +90,8 @@ type CellType int
 const (
 	CellTypeInt CellType = iota
 	CellTypeText
+	CellTypeFloat
+	CellTypeDateTime
 )
 
 // AsText 返回单元格的文本值
@@ -98,6 +102,10 @@ func (c *Cell) AsText() string {
 		return s
 	case CellTypeText:
 		return c.TextValue
+	case CellTypeFloat:
+		return fmt.Sprintf("%.4f", c.FloatValue)
+	case CellTypeDateTime:
+		return c.TextValue // 时间格式为存储为字符串格式（如"2023-10-01 12:34:56"）
 	default:
 		return "NULL"
 	}
@@ -111,6 +119,14 @@ func (c *Cell) AsInt() int32 {
 	return 0
 }
 
+// AsFloat 返回单元格的浮点数值
+func (c *Cell) AsFloat() float32 {
+	if c.Type == CellTypeFloat {
+		return c.FloatValue
+	}
+	return 0.0
+}
+
 // String 返回单元格的字符串表示
 func (c Cell) String() string {
 	switch c.Type {
@@ -118,6 +134,10 @@ func (c Cell) String() string {
 		return fmt.Sprintf("%d", c.IntValue)
 	case CellTypeText:
 		return c.TextValue
+	case CellTypeFloat:
+		return fmt.Sprintf("%.2f", c.FloatValue)
+	case CellTypeDateTime:
+		return c.TimeValue
 	default:
 		return "NULL"
 	}
@@ -179,6 +199,35 @@ type StringLiteral struct {
 
 func (sl *StringLiteral) expressionNode()      {}
 func (sl *StringLiteral) TokenLiteral() string { return sl.Token.Literal }
+
+// 新增FloatLiteral表达式类型
+type FloatLiteral struct {
+	Token lexer.Token
+	Value string // 存储原始字符串（如"123.45"）或转换为float64
+}
+
+func (fl *FloatLiteral) expressionNode()      {}
+func (fl *FloatLiteral) TokenLiteral() string { return fl.Token.Literal }
+
+// 新增DateTimeLiteral表达式类型
+type DateTimeLiteral struct {
+	Token lexer.Token
+	Value string
+}
+
+func (tl *DateTimeLiteral) expressionNode()      {}
+func (tl *DateTimeLiteral) TokenLiteral() string { return tl.Token.Literal }
+
+// BetweenExpression 表示 BETWEEN AND 表达式（新增）
+type BetweenExpression struct {
+	Token lexer.Token // BETWEEN 标记
+	Left  Expression  // 左操作数（列名或表达式）
+	Low   Expression  // 下限值
+	High  Expression  // 上限值
+}
+
+func (be *BetweenExpression) expressionNode()      {}
+func (be *BetweenExpression) TokenLiteral() string { return be.Token.Literal }
 
 // Identifier 表示标识符
 type Identifier struct {

@@ -47,6 +47,11 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	}
 
 	for p.curToken.Type != lexer.EOF {
+		//跳过注释
+		if p.curToken.Type == lexer.COMMENT {
+			p.nextToken()
+			continue
+		}
 		stmt, err := p.parseStatement()
 		if err != nil {
 			return nil, err
@@ -63,6 +68,10 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 // parseStatement 解析语句
 // 根据当前标记类型选择相应的解析方法
 func (p *Parser) parseStatement() (ast.Statement, error) {
+	// 跳过注释
+	for p.curToken.Type == lexer.COMMENT {
+		p.nextToken()
+	}
 	switch p.curToken.Type {
 	case lexer.CREATE:
 		return p.parseCreateTableStatement()
@@ -115,10 +124,12 @@ func (p *Parser) parseCreateTableStatement() (*ast.CreateTableStatement, error) 
 			Name: p.curToken.Literal,
 		}
 
-		if !p.expectPeek(lexer.INT) && !p.expectPeek(lexer.TEXT) {
+		if !p.expectPeek(lexer.INT) &&
+			!p.expectPeek(lexer.TEXT) &&
+			!p.expectPeek(lexer.FLOAT) &&
+			!p.expectPeek(lexer.DATETIME) {
 			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.peekToken.Literal)
 		}
-
 		col.Type = string(p.curToken.Type)
 
 		if p.peekTokenIs(lexer.PRIMARY) {
@@ -264,6 +275,15 @@ func (p *Parser) parseSelectStatement() (*ast.SelectStatement, error) {
 			return stmt, nil
 		}
 
+		// 处理BETWEEN操作符
+		if p.curTokenIs(lexer.BETWEEN) {
+			expr, err := p.parseBetweenExpression(left)
+			if err != nil {
+				return nil, err
+			}
+			stmt.Where = expr
+			return stmt, nil
+		}
 		// 处理其他操作符
 		if !p.curTokenIs(lexer.EQ) && !p.curTokenIs(lexer.GT) && !p.curTokenIs(lexer.LT) {
 			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", operator.Type)
@@ -446,11 +466,22 @@ func (p *Parser) parseDropTableStatement() (*ast.DropTableStatement, error) {
 // 支持字面量、标识符等
 func (p *Parser) parseExpression() (ast.Expression, error) {
 	switch p.curToken.Type {
-	case lexer.INT_LIT:
+	case lexer.INT:
 		return &ast.IntegerLiteral{
 			Token: p.curToken,
 			Value: p.curToken.Literal,
 		}, nil
+	case lexer.FLOAT:
+		return &ast.FloatLiteral{
+			Token: p.curToken,
+			Value: p.curToken.Literal,
+		}, nil
+	case lexer.DATETIME:
+		return &ast.DateTimeLiteral{
+			Token: p.curToken,
+			Value: p.curToken.Literal,
+		}, nil
+
 	case lexer.STRING:
 		return &ast.StringLiteral{
 			Token: p.curToken,
@@ -497,6 +528,9 @@ func (p *Parser) parseWhereClause() (ast.Expression, error) {
 		Token: p.curToken,
 		Value: p.curToken.Literal,
 	}
+	if p.peekTokenIs(lexer.BETWEEN) {
+		return p.parseBetweenExpression(left)
+	}
 
 	// 解析操作符
 	p.nextToken()
@@ -538,4 +572,35 @@ func (p *Parser) parseWhereClause() (ast.Expression, error) {
 		Operator: operator.Literal,
 		Right:    right,
 	}, nil
+}
+
+func (p *Parser) parseBetweenExpression(left ast.Expression) (ast.Expression, error) {
+	expr := &ast.BetweenExpression{
+		Token: p.curToken,
+		Left:  left,
+	}
+
+	p.nextToken() // 跳过BETWEEN
+
+	// 解析下限值
+	lower, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	expr.Low = lower
+
+	if !p.expectPeek(lexer.AND) {
+		return nil, fmt.Errorf("expected AND after BETWEEN expression")
+	}
+
+	p.nextToken() // 跳过AND
+
+	// 解析上限值
+	upper, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	expr.High = upper
+
+	return expr, nil
 }
