@@ -62,4 +62,11 @@ select * from users where ctime between '2021-07-02 12:00:00' and '2023-07-05 12
 select * from users where ctime >  '2023-07-02 12:00:00';
 
 
+---- 第三期 新增对default 默认值的支持、新增对内置函数的支持
+CREATE TABLE users (id INT PRIMARY KEY,name text,age INT,score FLOAT, ctime DATETIME DEFAULT '2023-07-04 12:00:00');
+INSERT INTO users (id, name, age, score) VALUES (2, 'Bob', 25,98.3);
+
+-- mysql
+CREATE TABLE default_users (id INT PRIMARY KEY,name text,age INT,score FLOAT, ctime DATETIME DEFAULT '2023-07-04 12:00:00');
+INSERT INTO default_users (id, name, age, score) VALUES (2, 'Bob', 25,98.3);
 
