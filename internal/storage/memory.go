@@ -76,39 +76,76 @@ func (b *MemoryBackend) Insert(stmt *ast.InsertStatement) error {
 	if !exists {
 		return fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
 	}
-
-	if len(stmt.Values) != len(table.Columns) {
-		return fmt.Errorf("Column count doesn't match value count at row 1")
+	// 构建列名到表列索引的映射
+	colIndexMap := make(map[string]int)
+	for idx, col := range table.Columns {
+		colIndexMap[col.Name] = idx
+	}
+	// 初始化行数据（长度为表的总列数）
+	row := make([]ast.Cell, len(table.Columns))
+	// 处理插入列列表（用户显式指定的列或隐式全列）
+	var insertCols []*ast.Identifier
+	//用户SQL需要插入的列名、值的映射
+	userColMap := make(map[string]ast.Expression)
+	if len(stmt.Columns) > 0 {
+		insertCols = stmt.Columns
+		for i, col := range stmt.Columns {
+			userColMap[col.Token.Literal] = stmt.Values[i]
+		}
+	} else {
+		// 未指定列时默认使用表的所有列
+		insertCols = make([]*ast.Identifier, len(table.Columns))
+		for i, col := range table.Columns {
+			insertCols[i] = &ast.Identifier{Value: col.Name}
+			userColMap[col.Name] = stmt.Values[i]
+		}
+	}
+	// 检查值数量与指定列数量是否匹配
+	if len(stmt.Values) != len(insertCols) {
+		return fmt.Errorf("Column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(insertCols))
 	}
 
 	// 转换值
-	row := make([]ast.Cell, len(stmt.Values))
-	for i, expr := range stmt.Values {
+	// 填充行数据（处理用户值或默认值）
+	for i, tableCol := range table.Columns {
+		// 优先使用用户提供的值，否则使用默认值
+		var expr ast.Expression
+		expr = userColMap[tableCol.Name]
+		if expr == nil && tableCol.Default != nil {
+			expr = tableCol.Default.(*ast.DefaultExpression).Value
+		}
+		//获取当前列名
+		colName := table.Columns[i].Name
+		tableColIdx, ok := colIndexMap[colName]
+		if !ok {
+			return fmt.Errorf("Unknown column '%s' in INSERT statement", colName)
+		}
+		// 转换值类型
 		value, err := evaluateExpression(expr)
 		if err != nil {
-			return err
+			return fmt.Errorf("invalid value for column '%s': %v", colName, err)
 		}
 
+		// 类型转换（保持原有逻辑）
 		switch v := value.(type) {
 		case string:
-			if table.Columns[i].Type == "INT" {
-				// 尝试将字符串转换为整数
+			if tableCol.Type == "INT" {
 				intVal, err := strconv.ParseInt(v, 10, 32)
 				if err != nil {
-					return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, table.Columns[i].Name)
+					return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, tableCol.Name)
 				}
-				row[i] = ast.Cell{Type: ast.CellTypeInt, IntValue: int32(intVal)}
+				row[tableColIdx] = ast.Cell{Type: ast.CellTypeInt, IntValue: int32(intVal)}
 			} else {
-				row[i] = ast.Cell{Type: ast.CellTypeText, TextValue: v}
+				row[tableColIdx] = ast.Cell{Type: ast.CellTypeText, TextValue: v}
 			}
 		case int32:
-			row[i] = ast.Cell{Type: ast.CellTypeInt, IntValue: v}
+			row[tableColIdx] = ast.Cell{Type: ast.CellTypeInt, IntValue: v}
 		case float32:
-			row[i] = ast.Cell{Type: ast.CellTypeFloat, FloatValue: v}
+			row[tableColIdx] = ast.Cell{Type: ast.CellTypeFloat, FloatValue: v}
 		case time.Time:
-			row[i] = ast.Cell{Type: ast.CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
+			row[tableColIdx] = ast.Cell{Type: ast.CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
 		default:
-			return fmt.Errorf("Unsupported value type: %T for column '%s'", value, table.Columns[i].Name)
+			return fmt.Errorf("Unsupported value type: %T for column '%s'", value, tableCol.Name)
 		}
 	}
 

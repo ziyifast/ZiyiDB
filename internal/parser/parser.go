@@ -140,6 +140,28 @@ func (p *Parser) parseCreateTableStatement() (*ast.CreateTableStatement, error) 
 			col.Primary = true
 		}
 
+		if p.peekTokenIs(lexer.DEFAULT) {
+			p.nextToken() // 消费 DEFAULT 关键字
+			p.nextToken() // 移动到默认值表达式开始位置
+
+			// 解析复杂默认值表达式（支持函数调用、数学表达式等）
+			defaultValue, err := p.parseExpression()
+			if err != nil {
+				return nil, fmt.Errorf("Invalid default value for column '%s': %v", col.Name, err)
+			}
+
+			// 创建 DefaultExpression 节点（需要同步修改 AST 定义）
+			col.Default = &ast.DefaultExpression{
+				Token: p.curToken, // 记录 DEFAULT 关键字的 token 位置
+				Value: defaultValue,
+			}
+			//stmt.Columns = append(stmt.Columns, col)
+			//// 向前查看是否还有其他列属性
+			//if p.peekTokenIs(lexer.COMMA) || p.peekTokenIs(lexer.RPAREN) {
+			//	continue
+			//}
+		}
+
 		stmt.Columns = append(stmt.Columns, col)
 
 		if p.peekTokenIs(lexer.COMMA) {
@@ -170,25 +192,45 @@ func (p *Parser) parseInsertStatement() (*ast.InsertStatement, error) {
 	}
 	stmt.TableName = p.curToken.Literal
 
+	// 解析可选的列名列表（例如：INSERT INTO users (id, name) VALUES (...)）
+	if p.peekTokenIs(lexer.LPAREN) {
+		p.nextToken() // 消费左括号
+		for !p.peekTokenIs(lexer.RPAREN) {
+			p.nextToken()
+			if !p.curTokenIs(lexer.IDENT) {
+				return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
+			}
+			// 列名作为标识符表达式存储
+			stmt.Columns = append(stmt.Columns, &ast.Identifier{
+				Token: p.curToken,
+				Value: p.curToken.Literal,
+			})
+			if p.peekTokenIs(lexer.COMMA) {
+				p.nextToken() // 消费逗号分隔符
+			}
+		}
+		if !p.expectPeek(lexer.RPAREN) { // 消费右括号
+			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.peekToken.Literal)
+		}
+	}
+
+	// 解析 VALUES 关键字
 	if !p.expectPeek(lexer.VALUES) {
 		return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.peekToken.Literal)
 	}
 
+	// 解析值列表（与原逻辑一致）
 	if !p.expectPeek(lexer.LPAREN) {
 		return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.peekToken.Literal)
 	}
 
-	// 解析值列表
 	for !p.peekTokenIs(lexer.RPAREN) {
 		p.nextToken()
-
 		expr, err := p.parseExpression()
 		if err != nil {
 			return nil, err
 		}
-
 		stmt.Values = append(stmt.Values, expr)
-
 		if p.peekTokenIs(lexer.COMMA) {
 			p.nextToken()
 		}
@@ -466,6 +508,8 @@ func (p *Parser) parseDropTableStatement() (*ast.DropTableStatement, error) {
 // 支持字面量、标识符等
 func (p *Parser) parseExpression() (ast.Expression, error) {
 	switch p.curToken.Type {
+	case lexer.LPAREN:
+		return p.parseGroupedExpression()
 	case lexer.INT:
 		return &ast.IntegerLiteral{
 			Token: p.curToken,
@@ -488,6 +532,9 @@ func (p *Parser) parseExpression() (ast.Expression, error) {
 			Value: p.curToken.Literal,
 		}, nil
 	case lexer.IDENT:
+		if p.peekTokenIs(lexer.LPAREN) {
+			return p.parseFunctionCall()
+		}
 		return &ast.Identifier{
 			Token: p.curToken,
 			Value: p.curToken.Literal,
@@ -603,4 +650,48 @@ func (p *Parser) parseBetweenExpression(left ast.Expression) (ast.Expression, er
 	expr.High = upper
 
 	return expr, nil
+}
+
+// 新增分组表达式解析
+func (p *Parser) parseGroupedExpression() (ast.Expression, error) {
+	p.nextToken() // 跳过左括号
+	expr, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	if !p.expectPeek(lexer.RPAREN) {
+		return nil, fmt.Errorf("Missing closing parenthesis")
+	}
+	return expr, nil
+}
+
+// 新增函数调用解析
+func (p *Parser) parseFunctionCall() (ast.Expression, error) {
+	fn := &ast.FunctionCall{
+		Token:  p.curToken,
+		Name:   p.curToken.Literal,
+		Params: []ast.Expression{},
+	}
+
+	p.nextToken() // 消费函数名
+	p.nextToken() // 消费左括号
+
+	for !p.peekTokenIs(lexer.RPAREN) {
+		p.nextToken()
+		param, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+		fn.Params = append(fn.Params, param)
+
+		if p.peekTokenIs(lexer.COMMA) {
+			p.nextToken()
+		}
+	}
+
+	if !p.expectPeek(lexer.RPAREN) {
+		return nil, fmt.Errorf("Missing closing parenthesis for function call")
+	}
+
+	return fn, nil
 }
