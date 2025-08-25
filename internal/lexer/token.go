@@ -25,6 +25,9 @@ const (
 	PRIMARY TokenType = "PRIMARY"
 	KEY     TokenType = "KEY"
 	LIKE    TokenType = "LIKE"
+	BETWEEN TokenType = "BETWEEN"
+	AND     TokenType = "AND"
+	DEFAULT TokenType = "DEFAULT"
 
 	// 标识符和字面量
 	IDENT    TokenType = "IDENT" // 标识符（如列名、表名）
@@ -33,8 +36,6 @@ const (
 	STRING   TokenType = "STRING" // 字符串字面量
 	FLOAT    TokenType = "FLOAT"
 	DATETIME TokenType = "DATETIME" // 时间字面量（如'2023-12-12 12:34:56'）
-	BETWEEN  TokenType = "BETWEEN"
-	AND      TokenType = "AND"
 
 	// 运算符
 	EQ TokenType = "="

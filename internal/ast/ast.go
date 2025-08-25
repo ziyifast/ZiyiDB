@@ -23,6 +23,13 @@ type Expression interface {
 	expressionNode()
 }
 
+type BaseExpression struct {
+	Token lexer.Token
+}
+
+func (b *BaseExpression) expressionNode()      {}
+func (b *BaseExpression) TokenLiteral() string { return b.Token.Literal }
+
 // Program 表示整个SQL程序
 // 包含多个 SQL 语句
 type Program struct {
@@ -60,6 +67,7 @@ func (cts *CreateTableStatement) TokenLiteral() string { return cts.Token.Litera
 type InsertStatement struct {
 	Token     lexer.Token
 	TableName string
+	Columns   []*Identifier // 列名列表
 	Values    []Expression
 }
 
@@ -73,6 +81,7 @@ type ColumnDefinition struct {
 	Type     string
 	Primary  bool
 	Nullable bool
+	Default  interface{} //列默认值
 }
 
 // Cell 表示单元格
@@ -184,39 +193,31 @@ func (be *BinaryExpression) TokenLiteral() string { return be.Token.Literal }
 
 // IntegerLiteral 表示整数字面量
 type IntegerLiteral struct {
+	BaseExpression
 	Token lexer.Token
 	Value string
 }
-
-func (il *IntegerLiteral) expressionNode()      {}
-func (il *IntegerLiteral) TokenLiteral() string { return il.Token.Literal }
 
 // StringLiteral 表示字符串字面量
 type StringLiteral struct {
+	BaseExpression
 	Token lexer.Token
 	Value string
 }
 
-func (sl *StringLiteral) expressionNode()      {}
-func (sl *StringLiteral) TokenLiteral() string { return sl.Token.Literal }
-
 // 新增FloatLiteral表达式类型
 type FloatLiteral struct {
+	BaseExpression
 	Token lexer.Token
 	Value string // 存储原始字符串（如"123.45"）或转换为float64
 }
 
-func (fl *FloatLiteral) expressionNode()      {}
-func (fl *FloatLiteral) TokenLiteral() string { return fl.Token.Literal }
-
 // 新增DateTimeLiteral表达式类型
 type DateTimeLiteral struct {
+	BaseExpression
 	Token lexer.Token
 	Value string
 }
-
-func (tl *DateTimeLiteral) expressionNode()      {}
-func (tl *DateTimeLiteral) TokenLiteral() string { return tl.Token.Literal }
 
 // BetweenExpression 表示 BETWEEN AND 表达式（新增）
 type BetweenExpression struct {
@@ -279,3 +280,22 @@ type DropTableStatement struct {
 
 func (ds *DropTableStatement) statementNode()       {}
 func (ds *DropTableStatement) TokenLiteral() string { return ds.Token.Literal }
+
+// DefaultExpression 表示DEFAULT表达式
+type DefaultExpression struct {
+	Token lexer.Token
+	Value Expression
+}
+
+func (de *DefaultExpression) expressionNode()      {}
+func (de *DefaultExpression) TokenLiteral() string { return de.Token.Literal }
+
+// FunctionCall 表示函数调用
+type FunctionCall struct {
+	Token  lexer.Token
+	Name   string
+	Params []Expression
+}
+
+func (fc *FunctionCall) expressionNode()      {}
+func (fc *FunctionCall) TokenLiteral() string { return fc.Token.Literal }

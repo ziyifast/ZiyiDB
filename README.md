@@ -303,7 +303,36 @@ go build -o ZiyiDB cmd/main.go
 
 运行效果：
 <img width="652" alt="image" src="https://github.com/user-attachments/assets/06ff023d-e536-45ab-9451-2ff74588abb8" />
+## 已实现功能
+### 支持字段类型
+| 字段类型 | 描述   |
+| --- |------|
+| INT | 整数类型 |
+| TEXT | 文本类型 |
+| DATETIME | 日期类型 |
+| FLOAT | 浮点类型 |
 
+### 支持关键字
+| 关键字         | 描述      |
+|-------------|---------|
+| CREATE      | 创建数据库对象 |
+| DROP        | 删除数据库对象 |
+| SELECT      | 查询数据    |
+| INSERT      | 插入数据    |
+| UPDATE      | 更新数据    |
+| DELETE      | 删除数据    |
+| WHERE       | 条件查询    |
+
+### 支持索引类型
+| 索引          | 描述   |
+|-------------|------|
+| PRIMARY KEY | 主键索引 |
+
+### 其他功能
+1. 支持>、=、<比较符号
+2. 支持LIKE模糊匹配
+3. 支持注释--
+4. 支持between and范围查询
 
 
 
@@ -319,7 +348,7 @@ MIT License
 todo::
 1. 实现!= >= <=等运算符
 2. 支持更多数据类型
-3. 实现内置函数 
+3. 实现内置函数
 4. 支持事务
 ...
 ...

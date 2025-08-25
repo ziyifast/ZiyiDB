@@ -195,6 +195,8 @@ func (l *Lexer) lookupIdentifier(ident string) TokenType {
 		return BETWEEN
 	case "AND":
 		return AND
+	case "DEFAULT":
+		return DEFAULT
 	default:
 		return IDENT
 	}

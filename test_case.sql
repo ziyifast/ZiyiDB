@@ -42,6 +42,7 @@ UPDATE users SET name = 'Robert', age = 8 WHERE id = 2;
 
 -- 8. 删除操作测试
 DELETE FROM users WHERE age > 30;
+select * from users;
 
 -- 9. 清理测试数据
 DROP TABLE users;
@@ -60,6 +61,12 @@ select * from users where age between 21 and 28;
 select * from users where score < 90.0;
 select * from users where ctime between '2021-07-02 12:00:00' and '2023-07-05 12:00:00';
 select * from users where ctime >  '2023-07-02 12:00:00';
+drop table users;
 
+---- 第三期 新增对default 默认值的支持、新增对内置函数的支持
+CREATE TABLE users (id INT PRIMARY KEY,name text,age INT DEFAULT 18,score FLOAT, ctime DATETIME DEFAULT '2023-07-04 12:00:00');
+INSERT INTO users (id, name, age, score, ctime) VALUES (1, 'Alice', 25, 90.0, '2025-07-04 12:00:00');
+INSERT INTO users (id, name, score) VALUES (2, 'Bob',98.3);
 
-
+INSERT INTO users (id, name, age, score) VALUES (3, 'Bo3', 38,98.3);
+select * from users;
