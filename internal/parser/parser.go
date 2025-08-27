@@ -326,8 +326,9 @@ func (p *Parser) parseSelectStatement() (*ast.SelectStatement, error) {
 			stmt.Where = expr
 			return stmt, nil
 		}
-		// 处理其他操作符
-		if !p.curTokenIs(lexer.EQ) && !p.curTokenIs(lexer.GT) && !p.curTokenIs(lexer.LT) {
+
+		// 处理其他操作符,如：>=、<=、<、>、=、!=、like...
+		if !p.isBasicOperator() {
 			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", operator.Type)
 		}
 
@@ -411,7 +412,38 @@ func (p *Parser) parseUpdateStatement() (*ast.UpdateStatement, error) {
 		// 解析操作符
 		p.nextToken()
 		operator := p.curToken
-		if !p.curTokenIs(lexer.EQ) && !p.curTokenIs(lexer.GT) && !p.curTokenIs(lexer.LT) {
+
+		// 处理LIKE操作符
+		if p.curTokenIs(lexer.LIKE) {
+			p.nextToken()
+			if !p.curTokenIs(lexer.STRING) {
+				return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
+			}
+			// 移除字符串字面量的引号
+			pattern := p.curToken.Literal
+			if len(pattern) >= 2 && (pattern[0] == '\'' || pattern[0] == '"') {
+				pattern = pattern[1 : len(pattern)-1]
+			}
+			stmt.Where = &ast.LikeExpression{
+				Token:   operator,
+				Left:    left,
+				Pattern: pattern,
+			}
+			return stmt, nil
+		}
+
+		// 处理BETWEEN操作符
+		if p.curTokenIs(lexer.BETWEEN) {
+			expr, err := p.parseBetweenExpression(left)
+			if err != nil {
+				return nil, err
+			}
+			stmt.Where = expr
+			return stmt, nil
+		}
+
+		// 处理其他操作符,如：>=、<=、<、>、=、!=、like...
+		if !p.isBasicOperator() {
 			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", operator.Type)
 		}
 
@@ -461,11 +493,41 @@ func (p *Parser) parseDeleteStatement() (*ast.DeleteStatement, error) {
 			Token: p.curToken,
 			Value: p.curToken.Literal,
 		}
-
 		// 解析操作符
 		p.nextToken()
 		operator := p.curToken
-		if !p.curTokenIs(lexer.EQ) && !p.curTokenIs(lexer.GT) && !p.curTokenIs(lexer.LT) {
+
+		// 处理LIKE操作符
+		if p.curTokenIs(lexer.LIKE) {
+			p.nextToken()
+			if !p.curTokenIs(lexer.STRING) {
+				return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
+			}
+			// 移除字符串字面量的引号
+			pattern := p.curToken.Literal
+			if len(pattern) >= 2 && (pattern[0] == '\'' || pattern[0] == '"') {
+				pattern = pattern[1 : len(pattern)-1]
+			}
+			stmt.Where = &ast.LikeExpression{
+				Token:   operator,
+				Left:    left,
+				Pattern: pattern,
+			}
+			return stmt, nil
+		}
+
+		// 处理BETWEEN操作符
+		if p.curTokenIs(lexer.BETWEEN) {
+			expr, err := p.parseBetweenExpression(left)
+			if err != nil {
+				return nil, err
+			}
+			stmt.Where = expr
+			return stmt, nil
+		}
+
+		// 处理其他操作符,如：>=、<=、<、>、=、!=、like...
+		if !p.isBasicOperator() {
 			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", operator.Type)
 		}
 
@@ -525,12 +587,13 @@ func (p *Parser) parseExpression() (ast.Expression, error) {
 			Token: p.curToken,
 			Value: p.curToken.Literal,
 		}, nil
-
 	case lexer.STRING:
 		return &ast.StringLiteral{
 			Token: p.curToken,
 			Value: p.curToken.Literal,
 		}, nil
+	case lexer.ASTERISK:
+		return &ast.StarExpression{}, nil
 	case lexer.IDENT:
 		if p.peekTokenIs(lexer.LPAREN) {
 			return p.parseFunctionCall()
@@ -668,16 +731,25 @@ func (p *Parser) parseGroupedExpression() (ast.Expression, error) {
 // 新增函数调用解析
 func (p *Parser) parseFunctionCall() (ast.Expression, error) {
 	fn := &ast.FunctionCall{
-		Token:  p.curToken,
+		Token:  p.curToken, // 当前token是函数名
 		Name:   p.curToken.Literal,
 		Params: []ast.Expression{},
 	}
 
-	p.nextToken() // 消费函数名
-	p.nextToken() // 消费左括号
+	// 检查下一个token是否为左括号
+	if !p.expectPeek(lexer.LPAREN) {
+		return nil, fmt.Errorf("expected ( after function name")
+	}
 
+	// 如果是右括号，说明没有参数
+	if p.peekTokenIs(lexer.RPAREN) {
+		p.nextToken() // 消费右括号
+		return fn, nil
+	}
+
+	// 解析参数列表
 	for !p.peekTokenIs(lexer.RPAREN) {
-		p.nextToken()
+		p.nextToken() // 移动到参数
 		param, err := p.parseExpression()
 		if err != nil {
 			return nil, err
@@ -685,7 +757,9 @@ func (p *Parser) parseFunctionCall() (ast.Expression, error) {
 		fn.Params = append(fn.Params, param)
 
 		if p.peekTokenIs(lexer.COMMA) {
-			p.nextToken()
+			p.nextToken() // 消费逗号
+		} else if !p.peekTokenIs(lexer.RPAREN) {
+			return nil, fmt.Errorf("expected comma or closing parenthesis in function call")
 		}
 	}
 
@@ -694,4 +768,15 @@ func (p *Parser) parseFunctionCall() (ast.Expression, error) {
 	}
 
 	return fn, nil
+}
+
+// isBasicOperator 检查是否为操作符，比如 =、>、<、>=、<=、!=、like等
+func (p *Parser) isBasicOperator() bool {
+	return p.curTokenIs(lexer.EQ) ||
+		p.curTokenIs(lexer.GT) ||
+		p.curTokenIs(lexer.LT) ||
+		p.curTokenIs(lexer.GTE) ||
+		p.curTokenIs(lexer.LTE) ||
+		p.curTokenIs(lexer.NEQ) ||
+		p.curTokenIs(lexer.LIKE)
 }

@@ -23,7 +23,7 @@ SELECT * FROM users;
 SELECT id, name FROM users;
 
 -- 5. WHERE 子句测试
--- 比较运算符 -- 待实现 != = >= <=逻辑
+-- 比较运算符 -- 待实现 != >= <=逻辑
 SELECT * FROM users WHERE age > 25;
 SELECT * FROM users WHERE age < 30;
 
@@ -63,10 +63,33 @@ select * from users where ctime between '2021-07-02 12:00:00' and '2023-07-05 12
 select * from users where ctime >  '2023-07-02 12:00:00';
 drop table users;
 
----- 第三期 新增对default 默认值的支持、新增对内置函数的支持
+---- 第三期 新增对default 默认值的支持
 CREATE TABLE users (id INT PRIMARY KEY,name text,age INT DEFAULT 18,score FLOAT, ctime DATETIME DEFAULT '2023-07-04 12:00:00');
 INSERT INTO users (id, name, age, score, ctime) VALUES (1, 'Alice', 25, 90.0, '2025-07-04 12:00:00');
 INSERT INTO users (id, name, score) VALUES (2, 'Bob',98.3);
 
 INSERT INTO users (id, name, age, score) VALUES (3, 'Bo3', 38,98.3);
 select * from users;
+drop table users;
+
+
+---- 第四期 1. 新增对内置函数的支持：count、sum、avg、max、min 2. 新增>=、<=、!=操作符
+CREATE TABLE users (id INT PRIMARY KEY,name text,age INT);
+INSERT INTO users VALUES (1, 'Alice', 20);
+INSERT INTO users VALUES (2, 'Bob', 25);
+INSERT INTO users VALUES (3, 'Charlie', 30);
+select * from users where age != 25;
+
+select count(*) from users;
+select count(*) from users where age <= 25;
+
+select sum(age) from users;
+select sum(age) from users where age >= 25;
+update users set name = 'tom' where age between 18 and 28;
+delete from users where age between 18 and 28;
+select avg(age) from users;
+select max(age) from users;
+select min(age) from users;
+drop table users;
+
+
