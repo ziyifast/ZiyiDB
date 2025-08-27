@@ -3,10 +3,12 @@ package storage
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
 	"ziyi.db.com/internal/ast"
 )
 
@@ -175,7 +177,7 @@ func (b *MemoryBackend) Insert(stmt *ast.InsertStatement) error {
 }
 
 // Select 查询数据
-// 支持 SELECT * 和指定列
+// 支持 SELECT * 、指定列和简单聚合函数
 // 处理 WHERE 条件
 // 返回查询结果
 func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*ast.Results, error) {
@@ -189,17 +191,52 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*ast.Results, error) 
 		Rows:    make([][]ast.Cell, 0),
 	}
 
-	// 处理选择列表
-	if len(stmt.Fields) == 1 && stmt.Fields[0].(*ast.StarExpression) != nil {
-		// SELECT *
-		for _, col := range table.Columns {
+	// 检查是否为聚合函数查询
+	isAggregation := false
+	var aggregateFunc *ast.FunctionCall
+
+	// 处理select列表
+	if len(stmt.Fields) == 1 {
+		// 检查是否为 SELECT *
+		if _, ok := stmt.Fields[0].(*ast.StarExpression); ok {
+			// SELECT *
+			for _, col := range table.Columns {
+				results.Columns = append(results.Columns, ast.ResultColumn{
+					Name: col.Name,
+					Type: col.Type,
+				})
+			}
+		} else if fn, ok := stmt.Fields[0].(*ast.FunctionCall); ok {
+			// 处理函数调用
+			isAggregation = true
+			aggregateFunc = fn
 			results.Columns = append(results.Columns, ast.ResultColumn{
-				Name: col.Name,
-				Type: col.Type,
+				Name: fn.Name,
+				Type: "FUNCTION",
 			})
+		} else {
+			// 处理单个标识符
+			if identifier, ok := stmt.Fields[0].(*ast.Identifier); ok {
+				found := false
+				for _, col := range table.Columns {
+					if col.Name == identifier.Value {
+						results.Columns = append(results.Columns, ast.ResultColumn{
+							Name: col.Name,
+							Type: col.Type,
+						})
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("Unknown column '%s' in 'field list'", identifier.Value)
+				}
+			} else {
+				return nil, fmt.Errorf("Unsupported select expression type")
+			}
 		}
 	} else {
-		// 处理指定的列
+		// 处理多个列
 		for _, expr := range stmt.Fields {
 			switch e := expr.(type) {
 			case *ast.Identifier:
@@ -218,13 +255,52 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*ast.Results, error) 
 				if !found {
 					return nil, fmt.Errorf("Unknown column '%s' in 'field list'", e.Value)
 				}
+			case *ast.FunctionCall:
+				// 处理函数调用（多列中的函数）
+				results.Columns = append(results.Columns, ast.ResultColumn{
+					Name: e.Name,
+					Type: "FUNCTION",
+				})
 			default:
-				return nil, fmt.Errorf("Unsupported select expression type")
+				if _, ok := e.(*ast.StarExpression); ok {
+					// SELECT *
+					for _, col := range table.Columns {
+						results.Columns = append(results.Columns, ast.ResultColumn{
+							Name: col.Name,
+							Type: col.Type,
+						})
+					}
+				} else {
+					return nil, fmt.Errorf("Unsupported select expression type")
+				}
 			}
 		}
 	}
 
+	// 如果是聚合函数查询，直接计算结果
+	if isAggregation {
+		// 处理WHERE子句
+		filteredRows := make([][]ast.Cell, 0)
+		for _, row := range table.Rows {
+			if stmt.Where != nil {
+				match, err := evaluateWhereCondition(stmt.Where, row, table.Columns)
+				if err != nil {
+					return nil, err
+				}
+				if !match {
+					continue
+				}
+			}
+			filteredRows = append(filteredRows, row)
+		}
+
+		functionResult := calculateFunctionResults(aggregateFunc, table, filteredRows)
+		results.Rows = [][]ast.Cell{functionResult}
+		return results, nil
+	}
+
 	// 处理WHERE子句
+	filteredRows := make([][]ast.Cell, 0)
 	for _, row := range table.Rows {
 		if stmt.Where != nil {
 			match, err := evaluateWhereCondition(stmt.Where, row, table.Columns)
@@ -235,8 +311,11 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*ast.Results, error) 
 				continue
 			}
 		}
+		filteredRows = append(filteredRows, row)
+	}
 
-		// 构建结果行
+	// 构建结果行
+	for _, row := range filteredRows {
 		resultRow := make([]ast.Cell, len(results.Columns))
 		for j, col := range results.Columns {
 			// 查找列在原始行中的位置
@@ -251,6 +330,296 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*ast.Results, error) 
 	}
 
 	return results, nil
+}
+
+// calculateFunctionResults 计算函数结果
+func calculateFunctionResults(fn *ast.FunctionCall, table *Table, rows [][]ast.Cell) []ast.Cell {
+	// 根据函数类型计算结果
+	switch strings.ToUpper(fn.Name) {
+	case "COUNT":
+		return calculateCount(fn, table, rows)
+	case "SUM":
+		return calculateSum(fn, table, rows)
+	case "AVG":
+		return calculateAvg(fn, table, rows)
+	case "MAX":
+		return calculateMax(fn, table, rows)
+	case "MIN":
+		return calculateMin(fn, table, rows)
+	default:
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: Unknown function '%s'", fn.Name)}}
+	}
+}
+
+// calculateCount 计算COUNT函数结果
+func calculateCount(fn *ast.FunctionCall, table *Table, rows [][]ast.Cell) []ast.Cell {
+	return []ast.Cell{{Type: ast.CellTypeInt, IntValue: int32(len(rows))}}
+}
+
+// calculateSum 计算SUM函数结果
+func calculateSum(fn *ast.FunctionCall, table *Table, rows [][]ast.Cell) []ast.Cell {
+	// 处理 SUM(column) 情况
+	if len(fn.Params) != 1 {
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: "ERROR: SUM function requires exactly one parameter"}}
+	}
+	var columnName string
+	// 检查参数类型
+	switch param := fn.Params[0].(type) {
+	case *ast.Identifier:
+		columnName = param.Value
+	default:
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: SUM function requires a column name, got %T", param)}}
+	}
+
+	// 查找列索引
+	colIndex := -1
+	for i, col := range table.Columns {
+		if col.Name == columnName {
+			colIndex = i
+			break
+		}
+	}
+
+	if colIndex == -1 {
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: Unknown column '%s'", columnName)}}
+	}
+
+	// 计算SUM值
+	var sumInt int32 = 0
+	var sumFloat float32 = 0.0
+	hasFloat := false
+
+	for _, row := range rows {
+		cell := row[colIndex]
+		switch cell.Type {
+		case ast.CellTypeInt:
+			sumInt += cell.IntValue
+		case ast.CellTypeFloat:
+			// 如果之前有整数，需要转换为浮点数
+			if !hasFloat {
+				sumFloat = float32(sumInt)
+				hasFloat = true
+			}
+			sumFloat += cell.FloatValue
+		}
+	}
+
+	// 返回结果
+	if hasFloat {
+		return []ast.Cell{{Type: ast.CellTypeFloat, FloatValue: sumFloat}}
+	}
+	return []ast.Cell{{Type: ast.CellTypeInt, IntValue: sumInt}}
+}
+
+// calculateAvg 计算AVG函数结果
+func calculateAvg(fn *ast.FunctionCall, table *Table, rows [][]ast.Cell) []ast.Cell {
+	// 处理 AVG(column) 情况
+	if len(fn.Params) != 1 {
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: "ERROR: AVG function requires exactly one parameter"}}
+	}
+	var columnName string
+	// 检查参数类型
+	switch param := fn.Params[0].(type) {
+	case *ast.Identifier:
+		columnName = param.Value
+	default:
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: AVG function requires a column name, got %T", param)}}
+	}
+
+	// 查找列索引
+	colIndex := -1
+	for i, col := range table.Columns {
+		if col.Name == columnName {
+			colIndex = i
+			break
+		}
+	}
+
+	if colIndex == -1 {
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: Unknown column '%s'", columnName)}}
+	}
+
+	// 计算平均值
+	var sumFloat float32 = 0.0
+	count := 0
+
+	for _, row := range rows {
+		cell := row[colIndex]
+		switch cell.Type {
+		case ast.CellTypeInt:
+			sumFloat += float32(cell.IntValue)
+			count++
+		case ast.CellTypeFloat:
+			sumFloat += cell.FloatValue
+			count++
+		default:
+			return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: Cannot calculate AVG for non-numeric column '%s'", columnName)}}
+		}
+	}
+
+	// 如果没有行，返回 NULL 或 0
+	if count == 0 {
+		return []ast.Cell{{Type: ast.CellTypeInt, IntValue: 0}}
+	}
+
+	avg := sumFloat / float32(count)
+	return []ast.Cell{{Type: ast.CellTypeFloat, FloatValue: avg}}
+}
+
+// calculateMax 计算MAX函数结果
+func calculateMax(fn *ast.FunctionCall, table *Table, rows [][]ast.Cell) []ast.Cell {
+	// 处理 MAX(column) 情况
+	if len(fn.Params) != 1 {
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: "ERROR: MAX function requires exactly one parameter"}}
+	}
+	var columnName string
+	// 检查参数类型
+	switch param := fn.Params[0].(type) {
+	case *ast.Identifier:
+		columnName = param.Value
+	default:
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: MAX function requires a column name, got %T", param)}}
+	}
+
+	// 查找列索引
+	colIndex := -1
+	for i, col := range table.Columns {
+		if col.Name == columnName {
+			colIndex = i
+			break
+		}
+	}
+
+	if colIndex == -1 {
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: Unknown column '%s'", columnName)}}
+	}
+
+	// 确定列的数据类型
+	var columnType ast.CellType
+	if len(rows) > 0 {
+		columnType = rows[0][colIndex].Type
+	} else {
+		// 如果没有数据行，返回默认值
+		return []ast.Cell{{Type: ast.CellTypeInt, IntValue: 0}}
+	}
+
+	// 计算最大值
+	switch columnType {
+	case ast.CellTypeInt:
+		maxVal := rows[0][colIndex].IntValue
+		for _, row := range rows {
+			cell := row[colIndex]
+			if cell.Type == ast.CellTypeInt && cell.IntValue > maxVal {
+				maxVal = cell.IntValue
+			}
+		}
+		return []ast.Cell{{Type: ast.CellTypeInt, IntValue: maxVal}}
+	case ast.CellTypeFloat:
+		maxVal := rows[0][colIndex].FloatValue
+		for _, row := range rows {
+			cell := row[colIndex]
+			switch cell.Type {
+			case ast.CellTypeFloat:
+				if cell.FloatValue > maxVal {
+					maxVal = cell.FloatValue
+				}
+			case ast.CellTypeInt:
+				if float32(cell.IntValue) > maxVal {
+					maxVal = float32(cell.IntValue)
+				}
+			}
+		}
+		return []ast.Cell{{Type: ast.CellTypeFloat, FloatValue: maxVal}}
+	case ast.CellTypeText:
+		maxVal := rows[0][colIndex].TextValue
+		for _, row := range rows {
+			cell := row[colIndex]
+			if cell.Type == ast.CellTypeText && cell.TextValue > maxVal {
+				maxVal = cell.TextValue
+			}
+		}
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: maxVal}}
+	default:
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: Unsupported column type for MAX function")}}
+	}
+}
+
+// calculateMin 计算MIN函数结果
+func calculateMin(fn *ast.FunctionCall, table *Table, rows [][]ast.Cell) []ast.Cell {
+	// 处理 MIN(column) 情况
+	if len(fn.Params) != 1 {
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: "ERROR: MIN function requires exactly one parameter"}}
+	}
+	var columnName string
+	// 检查参数类型
+	switch param := fn.Params[0].(type) {
+	case *ast.Identifier:
+		columnName = param.Value
+	default:
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: MIN function requires a column name, got %T", param)}}
+	}
+
+	// 查找列索引
+	colIndex := -1
+	for i, col := range table.Columns {
+		if col.Name == columnName {
+			colIndex = i
+			break
+		}
+	}
+
+	if colIndex == -1 {
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: Unknown column '%s'", columnName)}}
+	}
+
+	// 如果没有数据行，返回默认值
+	if len(rows) == 0 {
+		return []ast.Cell{{Type: ast.CellTypeInt, IntValue: 0}}
+	}
+
+	// 确定列的数据类型
+	var columnType ast.CellType
+	columnType = rows[0][colIndex].Type
+
+	// 计算最小值
+	switch columnType {
+	case ast.CellTypeInt:
+		minVal := rows[0][colIndex].IntValue
+		for _, row := range rows {
+			cell := row[colIndex]
+			if cell.Type == ast.CellTypeInt && cell.IntValue < minVal {
+				minVal = cell.IntValue
+			}
+		}
+		return []ast.Cell{{Type: ast.CellTypeInt, IntValue: minVal}}
+	case ast.CellTypeFloat:
+		minVal := rows[0][colIndex].FloatValue
+		for _, row := range rows {
+			cell := row[colIndex]
+			switch cell.Type {
+			case ast.CellTypeFloat:
+				if cell.FloatValue < minVal {
+					minVal = cell.FloatValue
+				}
+			case ast.CellTypeInt:
+				if float32(cell.IntValue) < minVal {
+					minVal = float32(cell.IntValue)
+				}
+			}
+		}
+		return []ast.Cell{{Type: ast.CellTypeFloat, FloatValue: minVal}}
+	case ast.CellTypeText:
+		minVal := rows[0][colIndex].TextValue
+		for _, row := range rows {
+			cell := row[colIndex]
+			if cell.Type == ast.CellTypeText && cell.TextValue < minVal {
+				minVal = cell.TextValue
+			}
+		}
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: minVal}}
+	default:
+		return []ast.Cell{{Type: ast.CellTypeText, TextValue: fmt.Sprintf("ERROR: Unsupported column type for MIN function")}}
+	}
 }
 
 // Update 执行UPDATE操作
@@ -389,9 +758,23 @@ func evaluateExpression(expr ast.Expression) (interface{}, error) {
 		return e.Value, nil
 	case *ast.Identifier:
 		return nil, fmt.Errorf("Cannot evaluate identifier: '%s'", e.Value)
+	case *ast.FunctionCall:
+		// 对于聚合函数，我们应该返回一个特殊的错误，指示它应该在Select方法中处理
+		// 这样可以避免在错误的路径中处理函数调用
+		functionName := strings.ToUpper(e.Name)
+		if functionName == "COUNT" || functionName == "SUM" || functionName == "AVG" || functionName == "MAX" || functionName == "MIN" {
+			return nil, fmt.Errorf("Aggregate functions should be handled in Select method")
+		}
+		return evaluateFunctionCall(e)
 	default:
 		return nil, fmt.Errorf("Unknown expression type: %T", expr)
 	}
+}
+
+// evaluateFunctionCall 评估函数调用（只处理非聚合函数）
+func evaluateFunctionCall(fn *ast.FunctionCall) (interface{}, error) {
+	// 这里可以实现非聚合函数的处理逻辑
+	return nil, fmt.Errorf("Unsupported function: %s", fn.Name)
 }
 
 // matchLikePattern 检查字符串是否匹配LIKE模式
@@ -456,6 +839,16 @@ func evaluateWhereCondition(expr ast.Expression, row []ast.Cell, columns []ast.C
 			return compareValues(leftValue, rightValue, ">")
 		case "<":
 			return compareValues(leftValue, rightValue, "<")
+		case ">=":
+			return compareValues(leftValue, rightValue, ">=")
+		case "<=":
+			return compareValues(leftValue, rightValue, "<=")
+		case "!=":
+			result, err := compareValues(leftValue, rightValue, "=")
+			if err != nil {
+				return false, err
+			}
+			return !result, nil // 返回相反的结果
 		default:
 			return false, fmt.Errorf("Unknown operator: '%s'", e.Operator)
 		}
@@ -521,7 +914,8 @@ func evaluateWhereCondition(expr ast.Expression, row []ast.Cell, columns []ast.C
 			if !lok || !uok {
 				return false, fmt.Errorf("type mismatch in BETWEEN expression")
 			}
-			return leftVal.After(lowerVal) && leftVal.Before(upperVal), nil
+			return (leftVal.After(lowerVal) || leftVal.Equal(lowerVal)) &&
+				(leftVal.Before(upperVal) || leftVal.Equal(upperVal)), nil
 		default:
 			return false, fmt.Errorf("unsupported type in BETWEEN expression")
 		}
@@ -532,50 +926,152 @@ func evaluateWhereCondition(expr ast.Expression, row []ast.Cell, columns []ast.C
 
 // compareValues 比较两个值
 func compareValues(left, right interface{}, operator string) (bool, error) {
+	// 首先检查类型是否匹配
+	if reflect.TypeOf(left) != reflect.TypeOf(right) {
+		// 特殊处理数字类型间的比较
+		if isNumericType(left) && isNumericType(right) {
+			return compareNumericValues(left, right, operator)
+		}
+		return false, fmt.Errorf("Cannot compare values of different types: %T and %T", left, right)
+	}
+
+	switch operator {
+	case "=":
+		return isEqual(left, right)
+	case ">":
+		return isGreater(left, right)
+	case "<":
+		return isLess(left, right)
+	case ">=":
+		equal, _ := isEqual(left, right)
+		greater, _ := isGreater(left, right)
+		return equal || greater, nil
+	case "<=":
+		equal, _ := isEqual(left, right)
+		less, _ := isLess(left, right)
+		return equal || less, nil
+	case "!=":
+		equal, err := isEqual(left, right)
+		if err != nil {
+			return false, err
+		}
+		return !equal, nil
+	default:
+		return false, fmt.Errorf("Unknown operator: '%s'", operator)
+	}
+}
+
+// 辅助函数：检查是否为数字类型
+func isNumericType(v interface{}) bool {
+	switch v.(type) {
+	case int32, float32:
+		return true
+	default:
+		return false
+	}
+}
+
+// 辅助函数：比较数字类型值
+func compareNumericValues(left, right interface{}, operator string) (bool, error) {
+	// 转换为 float32 进行比较
+	var leftVal, rightVal float32
+
+	switch l := left.(type) {
+	case int32:
+		leftVal = float32(l)
+	case float32:
+		leftVal = l
+	}
+
+	switch r := right.(type) {
+	case int32:
+		rightVal = float32(r)
+	case float32:
+		rightVal = r
+	}
+
+	switch operator {
+	case "=":
+		return leftVal == rightVal, nil
+	case ">":
+		return leftVal > rightVal, nil
+	case "<":
+		return leftVal < rightVal, nil
+	case ">=":
+		return leftVal >= rightVal, nil
+	case "<=":
+		return leftVal <= rightVal, nil
+	case "!=":
+		return leftVal != rightVal, nil
+	default:
+		return false, fmt.Errorf("Unknown operator: '%s'", operator)
+	}
+}
+
+// 辅助函数：判断是否相等
+func isEqual(left, right interface{}) (bool, error) {
 	switch l := left.(type) {
 	case int32:
 		if r, ok := right.(int32); ok {
-			switch operator {
-			case "=":
-				return l == r, nil
-			case ">":
-				return l > r, nil
-			case "<":
-				return l < r, nil
-			}
+			return l == r, nil
 		}
 	case string:
 		if r, ok := right.(string); ok {
-			switch operator {
-			case "=":
-				return l == r, nil
-			case ">":
-				return l > r, nil
-			case "<":
-				return l < r, nil
-			}
+			return l == r, nil
 		}
 	case float32:
 		if r, ok := right.(float32); ok {
-			switch operator {
-			case "=":
-				return l == r, nil
-			case ">":
-				return l > r, nil
-			case "<":
-				return l < r, nil
-			}
+			return l == r, nil
 		}
 	case time.Time:
 		if r, ok := right.(time.Time); ok {
-			switch operator {
-			case "=":
-				return l.Equal(r), nil
-			case ">":
-				return l.After(r), nil
-			case "<":
-				return l.Before(r), nil
-			}
+			return l.Equal(r), nil
+		}
+	}
+	return false, fmt.Errorf("Cannot compare values of different types: %T and %T", left, right)
+}
+
+// 辅助函数：判断是否大于
+func isGreater(left, right interface{}) (bool, error) {
+	switch l := left.(type) {
+	case int32:
+		if r, ok := right.(int32); ok {
+			return l > r, nil
+		}
+	case string:
+		if r, ok := right.(string); ok {
+			return l > r, nil
+		}
+	case float32:
+		if r, ok := right.(float32); ok {
+			return l > r, nil
+		}
+	case time.Time:
+		if r, ok := right.(time.Time); ok {
+			return l.After(r), nil
+		}
+	}
+	return false, fmt.Errorf("Cannot compare values of different types: %T and %T", left, right)
+}
+
+// 辅助函数：判断是否小于
+func isLess(left, right interface{}) (bool, error) {
+	switch l := left.(type) {
+	case int32:
+		if r, ok := right.(int32); ok {
+			return l < r, nil
+		}
+	case string:
+		if r, ok := right.(string); ok {
+			return l < r, nil
+		}
+	case float32:
+		if r, ok := right.(float32); ok {
+			return l < r, nil
+		}
+	case time.Time:
+		if r, ok := right.(time.Time); ok {
+			return l.Before(r), nil
 		}
 	}
 	return false, fmt.Errorf("Cannot compare values of different types: %T and %T", left, right)

@@ -30,7 +30,7 @@ const (
 	DEFAULT TokenType = "DEFAULT"
 
 	// 标识符和字面量
-	IDENT    TokenType = "IDENT" // 标识符（如列名、表名）
+	IDENT    TokenType = "IDENT" // 标识符（如列名、表名、函数名）
 	INT      TokenType = "INT"   // 整数型
 	TEXT     TokenType = "TEXT"
 	STRING   TokenType = "STRING" // 字符串字面量
@@ -38,9 +38,12 @@ const (
 	DATETIME TokenType = "DATETIME" // 时间字面量（如'2023-12-12 12:34:56'）
 
 	// 运算符
-	EQ TokenType = "="
-	GT TokenType = ">"
-	LT TokenType = "<"
+	EQ  TokenType = "="
+	GT  TokenType = ">"
+	LT  TokenType = "<"
+	GTE TokenType = ">="
+	LTE TokenType = "<="
+	NEQ TokenType = "!="
 
 	// 标识符
 	COMMA    TokenType = ","

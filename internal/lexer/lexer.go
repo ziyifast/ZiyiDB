@@ -38,9 +38,17 @@ func (l *Lexer) readChar() {
 	}
 }
 
+// 操作符映射表
+var operatorMap = map[string]TokenType{
+	"=":  EQ,
+	">":  GT,
+	"<":  LT,
+	">=": GTE,
+	"<=": LTE,
+	"!=": NEQ,
+}
+
 // NextToken 获取下一个词法单元
-// 识别并返回下一个标记
-// 处理各种类型的标记：运算符、分隔符、标识符、数字、字符串等
 func (l *Lexer) NextToken() Token {
 	var tok Token
 	// 跳过空白字符
@@ -49,13 +57,12 @@ func (l *Lexer) NextToken() Token {
 	if l.ch == '-' && l.peekChar() == '-' {
 		return l.readComment()
 	}
+
 	switch l.ch {
-	case '=':
-		tok = Token{Type: EQ, Literal: "="}
-	case '>':
-		tok = Token{Type: GT, Literal: ">"}
-	case '<':
-		tok = Token{Type: LT, Literal: "<"}
+	case '=', '>', '<', '!':
+		// 处理操作符
+		tok = l.readOperator()
+		return tok
 	case ',':
 		tok = Token{Type: COMMA, Literal: ","}
 	case ';':
@@ -104,6 +111,28 @@ func (l *Lexer) NextToken() Token {
 
 	l.readChar()
 	return tok
+}
+
+// readOperator 读取操作符
+func (l *Lexer) readOperator() Token {
+	var op bytes.Buffer
+	op.WriteRune(l.ch)
+
+	// 检查是否为双字符操作符
+	if l.peekChar() == '=' {
+		op.WriteRune(l.peekChar())
+		l.readChar() // 消费 '='
+	}
+
+	literal := op.String()
+	if tokenType, exists := operatorMap[literal]; exists {
+		l.readChar() // 消费当前字符
+		return Token{Type: tokenType, Literal: literal}
+	}
+
+	// 如果不是有效的操作符，回退并返回错误
+	l.readChar()
+	return Token{Type: ERROR, Literal: literal}
 }
 
 func (l *Lexer) skipWhitespace() {
