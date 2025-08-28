@@ -2,7 +2,7 @@
 package ast
 
 import (
-	"fmt"
+	"time"
 	"ziyi.db.com/internal/lexer"
 )
 
@@ -84,86 +84,6 @@ type ColumnDefinition struct {
 	Default  interface{} //列默认值
 }
 
-// Cell 表示单元格
-type Cell struct {
-	Type       CellType
-	IntValue   int32
-	TextValue  string
-	FloatValue float32 // 用于Float
-	TimeValue  string
-}
-
-// CellType 表示单元格类型
-type CellType int
-
-const (
-	CellTypeInt CellType = iota
-	CellTypeText
-	CellTypeFloat
-	CellTypeDateTime
-)
-
-// AsText 返回单元格的文本值
-func (c *Cell) AsText() string {
-	switch c.Type {
-	case CellTypeInt:
-		s := fmt.Sprintf("%d", c.IntValue)
-		return s
-	case CellTypeText:
-		return c.TextValue
-	case CellTypeFloat:
-		return fmt.Sprintf("%.4f", c.FloatValue)
-	case CellTypeDateTime:
-		return c.TextValue // 时间格式为存储为字符串格式（如"2023-10-01 12:34:56"）
-	default:
-		return "NULL"
-	}
-}
-
-// AsInt 返回单元格的整数值
-func (c *Cell) AsInt() int32 {
-	if c.Type == CellTypeInt {
-		return c.IntValue
-	}
-	return 0
-}
-
-// AsFloat 返回单元格的浮点数值
-func (c *Cell) AsFloat() float32 {
-	if c.Type == CellTypeFloat {
-		return c.FloatValue
-	}
-	return 0.0
-}
-
-// String 返回单元格的字符串表示
-func (c Cell) String() string {
-	switch c.Type {
-	case CellTypeInt:
-		return fmt.Sprintf("%d", c.IntValue)
-	case CellTypeText:
-		return c.TextValue
-	case CellTypeFloat:
-		return fmt.Sprintf("%.2f", c.FloatValue)
-	case CellTypeDateTime:
-		return c.TimeValue
-	default:
-		return "NULL"
-	}
-}
-
-// Results 表示查询结果
-type Results struct {
-	Columns []ResultColumn
-	Rows    [][]Cell
-}
-
-// ResultColumn 表示结果列
-type ResultColumn struct {
-	Name string
-	Type string
-}
-
 // StarExpression 表示星号表达式
 type StarExpression struct{}
 
@@ -195,25 +115,25 @@ func (be *BinaryExpression) TokenLiteral() string { return be.Token.Literal }
 type IntegerLiteral struct {
 	BaseExpression
 	Token lexer.Token
-	Value string
+	Value int32 // 修改为实际的int32值
+}
+
+// FloatLiteral 表示浮点数字面量
+type FloatLiteral struct {
+	BaseExpression
+	Token lexer.Token
+	Value float32 // 修改为实际的float32值
+}
+
+// DateTimeLiteral 表示日期时间字面量
+type DateTimeLiteral struct {
+	BaseExpression
+	Token lexer.Token
+	Value time.Time // 修改为实际的time.Time值
 }
 
 // StringLiteral 表示字符串字面量
 type StringLiteral struct {
-	BaseExpression
-	Token lexer.Token
-	Value string
-}
-
-// 新增FloatLiteral表达式类型
-type FloatLiteral struct {
-	BaseExpression
-	Token lexer.Token
-	Value string // 存储原始字符串（如"123.45"）或转换为float64
-}
-
-// 新增DateTimeLiteral表达式类型
-type DateTimeLiteral struct {
 	BaseExpression
 	Token lexer.Token
 	Value string
