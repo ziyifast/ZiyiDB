@@ -2,6 +2,7 @@
 package ast
 
 import (
+	"time"
 	"ziyi.db.com/internal/lexer"
 )
 
@@ -114,25 +115,25 @@ func (be *BinaryExpression) TokenLiteral() string { return be.Token.Literal }
 type IntegerLiteral struct {
 	BaseExpression
 	Token lexer.Token
-	Value string
+	Value int32 // 修改为实际的int32值
+}
+
+// FloatLiteral 表示浮点数字面量
+type FloatLiteral struct {
+	BaseExpression
+	Token lexer.Token
+	Value float32 // 修改为实际的float32值
+}
+
+// DateTimeLiteral 表示日期时间字面量
+type DateTimeLiteral struct {
+	BaseExpression
+	Token lexer.Token
+	Value time.Time // 修改为实际的time.Time值
 }
 
 // StringLiteral 表示字符串字面量
 type StringLiteral struct {
-	BaseExpression
-	Token lexer.Token
-	Value string
-}
-
-// 新增FloatLiteral表达式类型
-type FloatLiteral struct {
-	BaseExpression
-	Token lexer.Token
-	Value string // 存储原始字符串（如"123.45"）或转换为float64
-}
-
-// 新增DateTimeLiteral表达式类型
-type DateTimeLiteral struct {
 	BaseExpression
 	Token lexer.Token
 	Value string

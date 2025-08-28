@@ -748,23 +748,11 @@ func (mb *MemoryBackend) DropTable(stmt *ast.DropTableStatement) error {
 func evaluateExpression(expr ast.Expression) (interface{}, error) {
 	switch e := expr.(type) {
 	case *ast.IntegerLiteral:
-		val, err := strconv.ParseInt(e.Value, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("Incorrect integer value: '%s'", e.Value)
-		}
-		return int32(val), nil
+		return e.Value, nil // 直接返回已解析的值
 	case *ast.FloatLiteral:
-		val, err := strconv.ParseFloat(e.Value, 32)
-		if err != nil {
-			return nil, fmt.Errorf("Incorrect float value: '%s'", e.Value)
-		}
-		return float32(val), nil
+		return e.Value, nil // 直接返回已解析的值
 	case *ast.DateTimeLiteral:
-		t, err := time.Parse("2006-01-02 15:04:05", e.Value)
-		if err != nil {
-			return nil, fmt.Errorf("Incorrect datetime value: '%s'", e.Value)
-		}
-		return t, nil
+		return e.Value, nil // 直接返回已解析的值
 	case *ast.StringLiteral:
 		return e.Value, nil
 	case *ast.Identifier:
@@ -1116,25 +1104,13 @@ func getColumnValue(expr ast.Expression, row []Cell, columns []ast.ColumnDefinit
 		}
 		return nil, fmt.Errorf("Unknown column '%s' in 'where clause'", e.Value)
 	case *ast.IntegerLiteral:
-		val, err := strconv.ParseInt(e.Value, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("Incorrect integer value: '%s'", e.Value)
-		}
-		return int32(val), nil
+		return e.Value, nil // 直接返回已解析的值
 	case *ast.StringLiteral:
 		return e.Value, nil
 	case *ast.FloatLiteral:
-		val, err := strconv.ParseFloat(e.Value, 32)
-		if err != nil {
-			return nil, fmt.Errorf("Incorrect float value: '%s'", e.Value)
-		}
-		return float32(val), nil
+		return e.Value, nil // 直接返回已解析的值
 	case *ast.DateTimeLiteral:
-		val, err := time.Parse("2006-01-02 15:04:05", e.Value)
-		if err != nil {
-			return nil, fmt.Errorf("Incorrect datetime value: '%s'", e.Value)
-		}
-		return val, nil
+		return e.Value, nil // 直接返回已解析的值
 	default:
 		return nil, fmt.Errorf("Unknown expression type: %T", expr)
 	}

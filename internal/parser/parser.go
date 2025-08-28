@@ -2,6 +2,8 @@ package parser
 
 import (
 	"fmt"
+	"strconv"
+	"time"
 	"ziyi.db.com/internal/ast"
 	"ziyi.db.com/internal/lexer"
 )
@@ -573,24 +575,40 @@ func (p *Parser) parseExpression() (ast.Expression, error) {
 	case lexer.LPAREN:
 		return p.parseGroupedExpression()
 	case lexer.INT:
+		val, err := strconv.ParseInt(p.curToken.Literal, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("Incorrect integer value: '%s'", p.curToken.Literal)
+		}
 		return &ast.IntegerLiteral{
-			Token: p.curToken,
-			Value: p.curToken.Literal,
+			BaseExpression: ast.BaseExpression{Token: p.curToken},
+			Token:          p.curToken,
+			Value:          int32(val),
 		}, nil
 	case lexer.FLOAT:
+		val, err := strconv.ParseFloat(p.curToken.Literal, 32)
+		if err != nil {
+			return nil, fmt.Errorf("Incorrect float value: '%s'", p.curToken.Literal)
+		}
 		return &ast.FloatLiteral{
-			Token: p.curToken,
-			Value: p.curToken.Literal,
+			BaseExpression: ast.BaseExpression{Token: p.curToken},
+			Token:          p.curToken,
+			Value:          float32(val),
 		}, nil
 	case lexer.DATETIME:
+		val, err := time.Parse("2006-01-02 15:04:05", p.curToken.Literal)
+		if err != nil {
+			return nil, fmt.Errorf("Incorrect datetime value: '%s'", p.curToken.Literal)
+		}
 		return &ast.DateTimeLiteral{
-			Token: p.curToken,
-			Value: p.curToken.Literal,
+			BaseExpression: ast.BaseExpression{Token: p.curToken},
+			Token:          p.curToken,
+			Value:          val,
 		}, nil
 	case lexer.STRING:
 		return &ast.StringLiteral{
-			Token: p.curToken,
-			Value: p.curToken.Literal,
+			BaseExpression: ast.BaseExpression{Token: p.curToken},
+			Token:          p.curToken,
+			Value:          p.curToken.Literal,
 		}, nil
 	case lexer.ASTERISK:
 		return &ast.StarExpression{}, nil
