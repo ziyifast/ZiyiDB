@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -202,6 +203,24 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 		Rows:    make([][]Cell, 0),
 	}
 
+	// 如果有 GROUP BY 子句
+	if len(stmt.GroupBy) > 0 {
+		res, err := b.selectWithGroupBy(stmt, table)
+		if err != nil {
+			return nil, err
+		}
+
+		// 处理 ORDER BY（在 GROUP BY 之后）
+		if len(stmt.OrderBy) > 0 {
+			res.Rows, err = b.orderBy(res.Rows, res.Columns, stmt.OrderBy, table.Columns)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		return res, nil
+	}
+
 	// 检查是否为聚合函数查询
 	isAggregation := false
 	var aggregateFunc *ast.FunctionCall
@@ -307,6 +326,8 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 
 		functionResult := calculateFunctionResults(aggregateFunc, table, filteredRows)
 		results.Rows = [][]Cell{functionResult}
+
+		// 聚合函数结果通常只有一行，不需要排序
 		return results, nil
 	}
 
@@ -337,6 +358,222 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 				}
 			}
 		}
+		results.Rows = append(results.Rows, resultRow)
+	}
+
+	// 处理 ORDER BY
+	if len(stmt.OrderBy) > 0 {
+		var err error
+		results.Rows, err = b.orderBy(results.Rows, results.Columns, stmt.OrderBy, table.Columns)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return results, nil
+}
+
+// orderBy 根据 ORDER BY 子句对结果进行排序
+func (b *MemoryBackend) orderBy(rows [][]Cell, resultCols []ResultColumn, orderBy []ast.OrderByClause, tableCols []ast.ColumnDefinition) ([][]Cell, error) {
+	// 创建列名到索引的映射
+	colIndexMap := make(map[string]int)
+	for i, col := range resultCols {
+		colIndexMap[col.Name] = i
+	}
+
+	// 创建排序键的索引和方向
+	type sortKey struct {
+		index     int
+		direction string
+	}
+
+	var sortKeys []sortKey
+	for _, ob := range orderBy {
+		identifier, ok := ob.Expression.(*ast.Identifier)
+		if !ok {
+			return nil, fmt.Errorf("ORDER BY only supports column names")
+		}
+
+		index, exists := colIndexMap[identifier.Value]
+		if !exists {
+			return nil, fmt.Errorf("Unknown column '%s' in 'order clause'", identifier.Value)
+		}
+
+		sortKeys = append(sortKeys, sortKey{
+			index:     index,
+			direction: ob.Direction,
+		})
+	}
+
+	// 使用 sort.Slice 进行排序
+	sort.Slice(rows, func(i, j int) bool {
+		for _, key := range sortKeys {
+			left := rows[i][key.index]
+			right := rows[j][key.index]
+
+			// 比较两个值
+			result, err := compareValues(left, right, "<")
+			if err != nil {
+				// 如果比较出错，保持原有顺序
+				return false
+			}
+
+			if result {
+				// 如果是升序，返回 true
+				// 如果是降序，返回 false
+				return key.direction == "ASC"
+			} else {
+				// 检查是否相等
+				equal, _ := compareValues(left, right, "=")
+				if !equal {
+					// 如果是降序，返回 true
+					// 如果是升序，返回 false
+					return key.direction == "DESC"
+				}
+				// 如果相等，继续比较下一个排序键
+			}
+		}
+		// 所有键都相等，保持原有顺序
+		return false
+	})
+
+	return rows, nil
+}
+
+// selectWithGroupBy 处理带有 GROUP BY 的查询
+func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Table) (*Results, error) {
+	results := &Results{
+		Columns: make([]ResultColumn, 0),
+		Rows:    make([][]Cell, 0),
+	}
+
+	// 验证 GROUP BY 字段存在于表中
+	groupByIndices := make([]int, len(stmt.GroupBy))
+	for i, expr := range stmt.GroupBy {
+		if identifier, ok := expr.(*ast.Identifier); ok {
+			found := false
+			for j, col := range table.Columns {
+				if col.Name == identifier.Value {
+					groupByIndices[i] = j
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("Unknown column '%s' in 'group statement'", identifier.Value)
+			}
+		} else {
+			return nil, fmt.Errorf("GROUP BY only supports column names")
+		}
+	}
+
+	// 构建结果列
+	for _, expr := range stmt.Fields {
+		switch e := expr.(type) {
+		case *ast.Identifier:
+			found := false
+			for _, col := range table.Columns {
+				if col.Name == e.Value {
+					results.Columns = append(results.Columns, ResultColumn{
+						Name: col.Name,
+						Type: col.Type,
+					})
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("Unknown column '%s' in 'field list'", e.Value)
+			}
+		case *ast.FunctionCall:
+			results.Columns = append(results.Columns, ResultColumn{
+				Name: e.Name,
+				Type: "FUNCTION",
+			})
+		case *ast.StarExpression:
+			for _, col := range table.Columns {
+				results.Columns = append(results.Columns, ResultColumn{
+					Name: col.Name,
+					Type: col.Type,
+				})
+			}
+		default:
+			return nil, fmt.Errorf("Unsupported select expression type")
+		}
+	}
+
+	// 处理WHERE子句
+	filteredRows := make([][]Cell, 0)
+	for _, row := range table.Rows {
+		if stmt.Where != nil {
+			match, err := evaluateWhereCondition(stmt.Where, row, table.Columns)
+			if err != nil {
+				return nil, err
+			}
+			if !match {
+				continue
+			}
+		}
+		filteredRows = append(filteredRows, row)
+	}
+
+	// 按 GROUP BY 字段分组
+	groups := make(map[string][][]Cell)
+	for _, row := range filteredRows {
+		// 构建分组键
+		groupKey := ""
+		for _, idx := range groupByIndices {
+			groupKey += row[idx].String() + "|"
+		}
+
+		// 将行添加到对应的组中
+		groups[groupKey] = append(groups[groupKey], row)
+	}
+
+	// 为每个组计算结果
+	for _, groupRows := range groups {
+		if len(groupRows) == 0 {
+			continue
+		}
+
+		resultRow := make([]Cell, len(results.Columns))
+		colIndex := 0
+
+		// 处理非聚合字段（GROUP BY 字段）
+		for _, expr := range stmt.Fields {
+			if identifier, ok := expr.(*ast.Identifier); ok {
+				// 检查是否为 GROUP BY 字段
+				isGroupByField := false
+				for _, groupByExpr := range stmt.GroupBy {
+					if groupByIdent, ok := groupByExpr.(*ast.Identifier); ok {
+						if groupByIdent.Value == identifier.Value {
+							isGroupByField = true
+							break
+						}
+					}
+				}
+
+				if isGroupByField {
+					// 对于 GROUP BY 字段，取第一个值（所有行应该相同）
+					for k, tableCol := range table.Columns {
+						if tableCol.Name == identifier.Value {
+							resultRow[colIndex] = groupRows[0][k]
+							break
+						}
+					}
+				}
+				colIndex++
+			}
+		}
+
+		// 处理聚合函数
+		for i, expr := range stmt.Fields {
+			if fn, ok := expr.(*ast.FunctionCall); ok {
+				functionResult := calculateFunctionResults(fn, table, groupRows)
+				resultRow[i] = functionResult[0]
+			}
+		}
+
 		results.Rows = append(results.Rows, resultRow)
 	}
 
@@ -925,6 +1162,15 @@ func evaluateWhereCondition(expr ast.Expression, row []Cell, columns []ast.Colum
 
 // compareValues 比较两个值
 func compareValues(left, right interface{}, operator string) (bool, error) {
+	// 如果参数是 Cell 类型，提取其值
+	if leftCell, ok := left.(Cell); ok {
+		left = getCellValue(leftCell)
+	}
+
+	if rightCell, ok := right.(Cell); ok {
+		right = getCellValue(rightCell)
+	}
+
 	// 首先检查类型是否匹配
 	if reflect.TypeOf(left) != reflect.TypeOf(right) {
 		// 特殊处理数字类型间的比较
@@ -957,6 +1203,26 @@ func compareValues(left, right interface{}, operator string) (bool, error) {
 		return !equal, nil
 	default:
 		return false, fmt.Errorf("Unknown operator: '%s'", operator)
+	}
+}
+
+// getCellValue 从 Cell 中提取实际值
+func getCellValue(cell Cell) interface{} {
+	switch cell.Type {
+	case CellTypeInt:
+		return cell.IntValue
+	case CellTypeText:
+		return cell.TextValue
+	case CellTypeFloat:
+		return cell.FloatValue
+	case CellTypeDateTime:
+		val, err := time.Parse("2006-01-02 15:04:05", cell.TimeValue)
+		if err != nil {
+			return cell.TimeValue
+		}
+		return val
+	default:
+		return cell.String()
 	}
 }
 

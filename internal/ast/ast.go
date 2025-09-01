@@ -44,6 +44,14 @@ type SelectStatement struct {
 	Fields    []Expression
 	TableName string
 	Where     Expression
+	GroupBy   []Expression    // 添加 GroupBy 字段，新增对group by 分组的支持
+	OrderBy   []OrderByClause // 添加 OrderBy 字段，新增对order by 排序的支持
+}
+
+// OrderByClause 表示 ORDER BY 子句中的排序项
+type OrderByClause struct {
+	Expression Expression
+	Direction  string // "ASC" 或 "DESC"
 }
 
 func (ss *SelectStatement) statementNode()       {}

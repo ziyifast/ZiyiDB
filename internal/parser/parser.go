@@ -285,71 +285,99 @@ func (p *Parser) parseSelectStatement() (*ast.SelectStatement, error) {
 	// 解析WHERE子句
 	if p.peekTokenIs(lexer.WHERE) {
 		p.nextToken()
-		p.nextToken()
+		whereExpr, err := p.parseWhereClause()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Where = whereExpr
+	}
 
-		// 解析左操作数（列名）
+	// 解析GROUP BY子句
+	if p.peekTokenIs(lexer.GROUP) {
+		p.nextToken() // 跳过 GROUP
+		if !p.expectPeek(lexer.BY) {
+			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.peekToken.Literal)
+		}
+
+		// 解析GROUP BY字段列表
+		for {
+			p.nextToken()
+			if !p.curTokenIs(lexer.IDENT) {
+				return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
+			}
+
+			expr := &ast.Identifier{
+				Token: p.curToken,
+				Value: p.curToken.Literal,
+			}
+			stmt.GroupBy = append(stmt.GroupBy, expr)
+
+			if !p.peekTokenIs(lexer.COMMA) {
+				break
+			}
+			p.nextToken() // 跳过逗号
+		}
+	}
+
+	// 解析ORDER BY子句
+	if p.peekTokenIs(lexer.ORDER) {
+		orderExprs, err := p.parseOrderByClause()
+		if err != nil {
+			return nil, err
+		}
+		stmt.OrderBy = orderExprs
+	}
+
+	return stmt, nil
+}
+
+// parseOrderByClause 解析ORDER BY子句
+func (p *Parser) parseOrderByClause() ([]ast.OrderByClause, error) {
+	// 跳过 ORDER 关键字
+	if !p.expectPeek(lexer.ORDER) {
+		return nil, fmt.Errorf("expected ORDER keyword")
+	}
+
+	// 跳过 BY 关键字
+	if !p.expectPeek(lexer.BY) {
+		return nil, fmt.Errorf("expected BY keyword")
+	}
+
+	var orderExprs []ast.OrderByClause
+
+	for {
+		p.nextToken()
+		// 解析表达式（列名）
 		if !p.curTokenIs(lexer.IDENT) {
 			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
 		}
-		left := &ast.Identifier{
+
+		expr := &ast.Identifier{
 			Token: p.curToken,
 			Value: p.curToken.Literal,
 		}
 
-		// 解析操作符
-		p.nextToken()
-		operator := p.curToken
+		orderClause := ast.OrderByClause{
+			Expression: expr,
+			Direction:  "ASC", // 默认升序
+		}
 
-		// 处理LIKE操作符
-		if p.curTokenIs(lexer.LIKE) {
+		// 检查是否有 ASC 或 DESC
+		if p.peekTokenIs(lexer.ASC) || p.peekTokenIs(lexer.DESC) {
 			p.nextToken()
-			if !p.curTokenIs(lexer.STRING) {
-				return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
-			}
-			// 移除字符串字面量的引号
-			pattern := p.curToken.Literal
-			if len(pattern) >= 2 && (pattern[0] == '\'' || pattern[0] == '"') {
-				pattern = pattern[1 : len(pattern)-1]
-			}
-			stmt.Where = &ast.LikeExpression{
-				Token:   operator,
-				Left:    left,
-				Pattern: pattern,
-			}
-			return stmt, nil
+			orderClause.Direction = p.curToken.Literal
 		}
 
-		// 处理BETWEEN操作符
-		if p.curTokenIs(lexer.BETWEEN) {
-			expr, err := p.parseBetweenExpression(left)
-			if err != nil {
-				return nil, err
-			}
-			stmt.Where = expr
-			return stmt, nil
-		}
+		orderExprs = append(orderExprs, orderClause)
 
-		// 处理其他操作符,如：>=、<=、<、>、=、!=、like...
-		if !p.isBasicOperator() {
-			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", operator.Type)
+		// 如果没有逗号，说明结束了
+		if !p.peekTokenIs(lexer.COMMA) {
+			break
 		}
-
-		// 解析右操作数
-		p.nextToken()
-		right, err := p.parseExpression()
-		if err != nil {
-			return nil, err
-		}
-
-		stmt.Where = &ast.BinaryExpression{
-			Token:    operator,
-			Left:     left,
-			Operator: operator.Literal,
-			Right:    right,
-		}
+		p.nextToken() // 跳过逗号
 	}
 
-	return stmt, nil
+	return orderExprs, nil
 }
 
 // parseUpdateStatement 解析UPDATE语句
@@ -646,17 +674,20 @@ func (p *Parser) expectPeek(t lexer.TokenType) bool {
 
 // parseWhereClause 解析WHERE子句
 func (p *Parser) parseWhereClause() (ast.Expression, error) {
-	p.nextToken()
-
+	p.nextToken() //消费where关键字
 	// 解析左操作数（列名）
 	if !p.curTokenIs(lexer.IDENT) {
 		return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
 	}
+
 	left := &ast.Identifier{
 		Token: p.curToken,
 		Value: p.curToken.Literal,
 	}
+
+	// 检查下一个是否为 BETWEEN 操作符
 	if p.peekTokenIs(lexer.BETWEEN) {
+		p.nextToken()
 		return p.parseBetweenExpression(left)
 	}
 
@@ -664,7 +695,7 @@ func (p *Parser) parseWhereClause() (ast.Expression, error) {
 	p.nextToken()
 	operator := p.curToken
 
-	// 处理LIKE操作符
+	// 处理 LIKE 操作符
 	if p.curTokenIs(lexer.LIKE) {
 		p.nextToken()
 		if !p.curTokenIs(lexer.STRING) {
@@ -682,8 +713,8 @@ func (p *Parser) parseWhereClause() (ast.Expression, error) {
 		}, nil
 	}
 
-	// 处理其他操作符
-	if !p.curTokenIs(lexer.EQ) && !p.curTokenIs(lexer.GT) && !p.curTokenIs(lexer.LT) {
+	// 处理其他操作符（包括 =、>、<、>=、<=、!= 等）
+	if !p.isBasicOperator() {
 		return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", operator.Type)
 	}
 
@@ -707,7 +738,6 @@ func (p *Parser) parseBetweenExpression(left ast.Expression) (ast.Expression, er
 		Token: p.curToken,
 		Left:  left,
 	}
-
 	p.nextToken() // 跳过BETWEEN
 
 	// 解析下限值

@@ -73,7 +73,7 @@ select * from users;
 drop table users;
 
 
----- 第四期 1. 新增对内置函数的支持：count、sum、avg、max、min 2. 新增>=、<=、!=操作符
+---- 第四期 新增对内置函数的支持：count、sum、avg、max、min 2. 新增>=、<=、!=操作符
 CREATE TABLE users (id INT PRIMARY KEY,name text,age INT);
 INSERT INTO users VALUES (1, 'Alice', 20);
 INSERT INTO users VALUES (2, 'Bob', 25);
@@ -86,10 +86,29 @@ select count(*) from users where age <= 25;
 select sum(age) from users;
 select sum(age) from users where age >= 25;
 update users set name = 'tom' where age between 18 and 28;
-delete from users where age between 18 and 28;
 select avg(age) from users;
 select max(age) from users;
 select min(age) from users;
+delete from users where age between 18 and 28;
 drop table users;
+
+---- 第五期 新增group by 、order by 支持
+-- group by 实现
+CREATE TABLE sales (id INT PRIMARY KEY, product TEXT, category TEXT, amount FLOAT);
+INSERT INTO sales VALUES (1, 'Apple', 'Fruit', 10.5);
+INSERT INTO sales VALUES (2, 'Banana', 'Fruit', 8.0);
+INSERT INTO sales VALUES (3, 'Carrot', 'Vegetable', 5.2);
+INSERT INTO sales VALUES (4, 'Broccoli', 'Vegetable', 7.3);
+INSERT INTO sales VALUES (5, 'Orange', 'Fruit', 9.8);
+SELECT category, COUNT(*) FROM sales GROUP BY category;
+SELECT category, SUM(amount) FROM sales GROUP BY category;
+SELECT category, AVG(amount) FROM sales GROUP BY category;
+
+-- order by 实现
+SELECT * FROM sales ORDER BY amount;
+SELECT * FROM sales ORDER BY amount DESC;
+SELECT * FROM sales ORDER BY category, amount DESC;
+
+DROP TABLE sales;
 
 
