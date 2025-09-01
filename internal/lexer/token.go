@@ -28,6 +28,11 @@ const (
 	BETWEEN TokenType = "BETWEEN"
 	AND     TokenType = "AND"
 	DEFAULT TokenType = "DEFAULT"
+	GROUP   TokenType = "GROUP"
+	BY      TokenType = "BY"
+	ORDER   TokenType = "ORDER"
+	ASC     TokenType = "ASC"
+	DESC    TokenType = "DESC"
 
 	// 标识符和字面量
 	IDENT    TokenType = "IDENT" // 标识符（如列名、表名、函数名）
