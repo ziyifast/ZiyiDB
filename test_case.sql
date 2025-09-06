@@ -111,4 +111,52 @@ SELECT * FROM sales ORDER BY category, amount DESC;
 
 DROP TABLE sales;
 
+---- 第六期 1. 支持简单事务，实现事务开启、提交、回滚能力 2. 新增客户端、网络。演示多个客户端操作同一个数据库（多个事务情况）
+-- 事务提交
+create table users (id INT PRIMARY KEY,name text,age INT);
+
+BEGIN;
+INSERT INTO users VALUES (1, 'Alice', 25);
+select * from users;
+COMMIT;
+select * from users; -- 提交后，数据可以看到Alice这行数据
+drop table users;
+
+-- 事务回滚
+create table users (id INT PRIMARY KEY,name text,age INT);
+
+BEGIN;
+INSERT INTO users VALUES (1, 'Alice', 25);
+select * from users;
+ROLLBACK;
+
+select * from users;
+
+select * from users; -- 回滚后，数据恢复到事务开始前的状态，看不到Alice这行数据
+drop table users;
+
+--------模拟多个事务并发执行
+-- 事务提交【多个事务，事务2预期可以看到事务1提交之后的结果】
+create table users (id INT PRIMARY KEY,name text,age INT); -- 此时开启session1、session2
+BEGIN;
+INSERT INTO users VALUES (1, 'Alice', 25);
+select * from users;
+COMMIT;
+
+
+-- 事务回滚【多个事务，事务2预期看不到事务1回滚的结果，同时事务1之前在事务内操作的全部回滚】
+-- 编译程序： go build -o ziyidb-client cmd/client.go
+-- go build -o ziyidb cmd/main.go
+-- 运行服务端：./ziyidb server -port 3118
+--运行客户端：./ziyidb-client localhost:3118
+create table users (id INT PRIMARY KEY,name text,age INT);-- 此时开启session1、session2
+BEGIN;
+INSERT INTO users VALUES (1, 'Alice', 25);
+select * from users;
+ROLLBACK;
+
+
+
+
+
 

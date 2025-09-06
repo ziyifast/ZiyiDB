@@ -157,11 +157,6 @@ func (p *Parser) parseCreateTableStatement() (*ast.CreateTableStatement, error) 
 				Token: p.curToken, // 记录 DEFAULT 关键字的 token 位置
 				Value: defaultValue,
 			}
-			//stmt.Columns = append(stmt.Columns, col)
-			//// 向前查看是否还有其他列属性
-			//if p.peekTokenIs(lexer.COMMA) || p.peekTokenIs(lexer.RPAREN) {
-			//	continue
-			//}
 		}
 
 		stmt.Columns = append(stmt.Columns, col)
@@ -428,68 +423,12 @@ func (p *Parser) parseUpdateStatement() (*ast.UpdateStatement, error) {
 	// 解析WHERE子句
 	if p.peekTokenIs(lexer.WHERE) {
 		p.nextToken()
-		p.nextToken()
 
-		// 解析左操作数（列名）
-		if !p.curTokenIs(lexer.IDENT) {
-			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
-		}
-		left := &ast.Identifier{
-			Token: p.curToken,
-			Value: p.curToken.Literal,
-		}
-
-		// 解析操作符
-		p.nextToken()
-		operator := p.curToken
-
-		// 处理LIKE操作符
-		if p.curTokenIs(lexer.LIKE) {
-			p.nextToken()
-			if !p.curTokenIs(lexer.STRING) {
-				return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
-			}
-			// 移除字符串字面量的引号
-			pattern := p.curToken.Literal
-			if len(pattern) >= 2 && (pattern[0] == '\'' || pattern[0] == '"') {
-				pattern = pattern[1 : len(pattern)-1]
-			}
-			stmt.Where = &ast.LikeExpression{
-				Token:   operator,
-				Left:    left,
-				Pattern: pattern,
-			}
-			return stmt, nil
-		}
-
-		// 处理BETWEEN操作符
-		if p.curTokenIs(lexer.BETWEEN) {
-			expr, err := p.parseBetweenExpression(left)
-			if err != nil {
-				return nil, err
-			}
-			stmt.Where = expr
-			return stmt, nil
-		}
-
-		// 处理其他操作符,如：>=、<=、<、>、=、!=、like...
-		if !p.isBasicOperator() {
-			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", operator.Type)
-		}
-
-		// 解析右操作数
-		p.nextToken()
-		right, err := p.parseExpression()
+		whereExpr, err := p.parseWhereClause()
 		if err != nil {
 			return nil, err
 		}
-
-		stmt.Where = &ast.BinaryExpression{
-			Token:    operator,
-			Left:     left,
-			Operator: operator.Literal,
-			Right:    right,
-		}
+		stmt.Where = whereExpr
 	}
 
 	return stmt, nil
@@ -513,67 +452,12 @@ func (p *Parser) parseDeleteStatement() (*ast.DeleteStatement, error) {
 	// 解析WHERE子句
 	if p.peekTokenIs(lexer.WHERE) {
 		p.nextToken()
-		p.nextToken()
 
-		// 解析左操作数（列名）
-		if !p.curTokenIs(lexer.IDENT) {
-			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
-		}
-		left := &ast.Identifier{
-			Token: p.curToken,
-			Value: p.curToken.Literal,
-		}
-		// 解析操作符
-		p.nextToken()
-		operator := p.curToken
-
-		// 处理LIKE操作符
-		if p.curTokenIs(lexer.LIKE) {
-			p.nextToken()
-			if !p.curTokenIs(lexer.STRING) {
-				return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
-			}
-			// 移除字符串字面量的引号
-			pattern := p.curToken.Literal
-			if len(pattern) >= 2 && (pattern[0] == '\'' || pattern[0] == '"') {
-				pattern = pattern[1 : len(pattern)-1]
-			}
-			stmt.Where = &ast.LikeExpression{
-				Token:   operator,
-				Left:    left,
-				Pattern: pattern,
-			}
-			return stmt, nil
-		}
-
-		// 处理BETWEEN操作符
-		if p.curTokenIs(lexer.BETWEEN) {
-			expr, err := p.parseBetweenExpression(left)
-			if err != nil {
-				return nil, err
-			}
-			stmt.Where = expr
-			return stmt, nil
-		}
-
-		// 处理其他操作符,如：>=、<=、<、>、=、!=、like...
-		if !p.isBasicOperator() {
-			return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", operator.Type)
-		}
-
-		// 解析右操作数
-		p.nextToken()
-		right, err := p.parseExpression()
+		whereExpr, err := p.parseWhereClause()
 		if err != nil {
 			return nil, err
 		}
-
-		stmt.Where = &ast.BinaryExpression{
-			Token:    operator,
-			Left:     left,
-			Operator: operator.Literal,
-			Right:    right,
-		}
+		stmt.Where = whereExpr
 	}
 
 	return stmt, nil
