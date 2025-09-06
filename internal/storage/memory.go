@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"ziyi.db.com/internal/ast"
 )
@@ -15,14 +16,18 @@ import (
 // MemoryBackend 内存存储引擎，管理所有表
 type MemoryBackend struct {
 	tables map[string]*Table
+	txnMgr *TransactionManager
+	mu     sync.RWMutex
 }
 
 // Table 数据表，包含列定义、数据行和索引
 type Table struct {
-	Name    string
-	Columns []ast.ColumnDefinition
-	Rows    [][]Cell
-	Indexes map[string]*Index // 值到行索引的映射
+	Name     string
+	Columns  []ast.ColumnDefinition
+	Rows     [][]VersionedCell // 保持为 VersionedCell
+	Indexes  map[string]*Index
+	RowLocks map[int]*sync.RWMutex // 行级锁
+	mu       sync.RWMutex
 }
 
 // Index 索引，用于加速查询
@@ -47,13 +52,20 @@ type ResultColumn struct {
 func NewMemoryBackend() *MemoryBackend {
 	return &MemoryBackend{
 		tables: make(map[string]*Table),
+		txnMgr: NewTransactionManager(),
 	}
+}
+
+// BeginTransaction 开始一个新事务
+func (b *MemoryBackend) BeginTransaction() *Transaction {
+	return b.txnMgr.BeginTransaction(b)
 }
 
 // CreateTable 创建表
 // 验证表名唯一性
 // 创建表结构
 // 为主键列创建索引
+// CreateTable 创建表
 func (b *MemoryBackend) CreateTable(stmt *ast.CreateTableStatement) error {
 	if _, exists := b.tables[stmt.TableName]; exists {
 		return fmt.Errorf("Table '%s' already exists", stmt.TableName)
@@ -62,7 +74,7 @@ func (b *MemoryBackend) CreateTable(stmt *ast.CreateTableStatement) error {
 	table := &Table{
 		Name:    stmt.TableName,
 		Columns: stmt.Columns,
-		Rows:    make([][]Cell, 0),
+		Rows:    make([][]VersionedCell, 0),
 		Indexes: make(map[string]*Index),
 	}
 
@@ -80,86 +92,139 @@ func (b *MemoryBackend) CreateTable(stmt *ast.CreateTableStatement) error {
 	return nil
 }
 
-// Insert 插入数据
 // 验证表存在性
 // 检查数据完整性
 // 处理主键约束
 // 维护索引
-func (b *MemoryBackend) Insert(stmt *ast.InsertStatement) error {
+// Insert 插入数据，支持事务
+func (b *MemoryBackend) Insert(stmt *ast.InsertStatement, txn *Transaction) error {
 	table, exists := b.tables[stmt.TableName]
 	if !exists {
 		return fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
 	}
-	// 构建列名到表列索引的映射
-	colIndexMap := make(map[string]int)
-	for idx, col := range table.Columns {
-		colIndexMap[col.Name] = idx
-	}
+
+	// 获取表锁
+	table.mu.Lock()
+	defer table.mu.Unlock()
+
 	// 初始化行数据（长度为表的总列数）
 	row := make([]Cell, len(table.Columns))
+
 	// 处理插入列列表（用户显式指定的列或隐式全列）
-	var insertCols []*ast.Identifier
-	//用户SQL需要插入的列名、值的映射
-	userColMap := make(map[string]ast.Expression)
 	if len(stmt.Columns) > 0 {
-		insertCols = stmt.Columns
+		// 用户指定了列名
+		if len(stmt.Columns) != len(stmt.Values) {
+			return fmt.Errorf("Column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(stmt.Columns))
+		}
+
+		// 构建列名到表列索引的映射
+		colIndexMap := make(map[string]int)
+		for idx, col := range table.Columns {
+			colIndexMap[col.Name] = idx
+		}
+
+		// 填充指定的列
 		for i, col := range stmt.Columns {
-			userColMap[col.Token.Literal] = stmt.Values[i]
+			colIndex, exists := colIndexMap[col.Value]
+			if !exists {
+				return fmt.Errorf("Unknown column '%s' in INSERT statement", col.Value)
+			}
+
+			value, err := evaluateExpression(stmt.Values[i])
+			if err != nil {
+				return fmt.Errorf("invalid value for column '%s': %v", col.Value, err)
+			}
+
+			// 类型转换
+			switch v := value.(type) {
+			case string:
+				if table.Columns[colIndex].Type == "INT" {
+					intVal, err := strconv.ParseInt(v, 10, 32)
+					if err != nil {
+						return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, col.Value)
+					}
+					row[colIndex] = Cell{Type: CellTypeInt, IntValue: int32(intVal)}
+				} else {
+					row[colIndex] = Cell{Type: CellTypeText, TextValue: v}
+				}
+			case int32:
+				row[colIndex] = Cell{Type: CellTypeInt, IntValue: v}
+			case float32:
+				row[colIndex] = Cell{Type: CellTypeFloat, FloatValue: v}
+			case time.Time:
+				row[colIndex] = Cell{Type: CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
+			default:
+				return fmt.Errorf("Unsupported value type: %T for column '%s'", value, col.Value)
+			}
 		}
 	} else {
-		// 未指定列时默认使用表的所有列
-		insertCols = make([]*ast.Identifier, len(table.Columns))
-		for i, col := range table.Columns {
-			insertCols[i] = &ast.Identifier{Value: col.Name}
-			userColMap[col.Name] = stmt.Values[i]
-		}
-	}
-	// 检查值数量与指定列数量是否匹配
-	if len(stmt.Values) != len(insertCols) {
-		return fmt.Errorf("Column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(insertCols))
-	}
-
-	// 转换值
-	// 填充行数据（处理用户值或默认值）
-	for i, tableCol := range table.Columns {
-		// 优先使用用户提供的值，否则使用默认值
-		var expr ast.Expression
-		expr = userColMap[tableCol.Name]
-		if expr == nil && tableCol.Default != nil {
-			expr = tableCol.Default.(*ast.DefaultExpression).Value
-		}
-		//获取当前列名
-		colName := table.Columns[i].Name
-		tableColIdx, ok := colIndexMap[colName]
-		if !ok {
-			return fmt.Errorf("Unknown column '%s' in INSERT statement", colName)
-		}
-		// 转换值类型
-		value, err := evaluateExpression(expr)
-		if err != nil {
-			return fmt.Errorf("invalid value for column '%s': %v", colName, err)
+		// 用户未指定列名，使用所有列
+		if len(stmt.Values) != len(table.Columns) {
+			return fmt.Errorf("Column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(table.Columns))
 		}
 
-		// 类型转换（保持原有逻辑）
-		switch v := value.(type) {
-		case string:
-			if tableCol.Type == "INT" {
-				intVal, err := strconv.ParseInt(v, 10, 32)
-				if err != nil {
-					return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, tableCol.Name)
-				}
-				row[tableColIdx] = Cell{Type: CellTypeInt, IntValue: int32(intVal)}
-			} else {
-				row[tableColIdx] = Cell{Type: CellTypeText, TextValue: v}
+		// 填充所有列
+		for i, expr := range stmt.Values {
+			value, err := evaluateExpression(expr)
+			if err != nil {
+				return fmt.Errorf("invalid value for column '%s': %v", table.Columns[i].Name, err)
 			}
-		case int32:
-			row[tableColIdx] = Cell{Type: CellTypeInt, IntValue: v}
-		case float32:
-			row[tableColIdx] = Cell{Type: CellTypeFloat, FloatValue: v}
-		case time.Time:
-			row[tableColIdx] = Cell{Type: CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
-		default:
-			return fmt.Errorf("Unsupported value type: %T for column '%s'", value, tableCol.Name)
+
+			// 类型转换
+			switch v := value.(type) {
+			case string:
+				if table.Columns[i].Type == "INT" {
+					intVal, err := strconv.ParseInt(v, 10, 32)
+					if err != nil {
+						return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, table.Columns[i].Name)
+					}
+					row[i] = Cell{Type: CellTypeInt, IntValue: int32(intVal)}
+				} else {
+					row[i] = Cell{Type: CellTypeText, TextValue: v}
+				}
+			case int32:
+				row[i] = Cell{Type: CellTypeInt, IntValue: v}
+			case float32:
+				row[i] = Cell{Type: CellTypeFloat, FloatValue: v}
+			case time.Time:
+				row[i] = Cell{Type: CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
+			default:
+				return fmt.Errorf("Unsupported value type: %T for column '%s'", value, table.Columns[i].Name)
+			}
+		}
+	}
+
+	// 处理默认值（对于未指定的列）
+	for i, col := range table.Columns {
+		// 如果该列没有被赋值且有默认值
+		if row[i].Type == 0 && col.Default != nil {
+			defaultExpr := col.Default.(*ast.DefaultExpression)
+			value, err := evaluateExpression(defaultExpr.Value)
+			if err != nil {
+				return fmt.Errorf("invalid default value for column '%s': %v", col.Name, err)
+			}
+
+			// 类型转换
+			switch v := value.(type) {
+			case string:
+				if col.Type == "INT" {
+					intVal, err := strconv.ParseInt(v, 10, 32)
+					if err != nil {
+						return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, col.Name)
+					}
+					row[i] = Cell{Type: CellTypeInt, IntValue: int32(intVal)}
+				} else {
+					row[i] = Cell{Type: CellTypeText, TextValue: v}
+				}
+			case int32:
+				row[i] = Cell{Type: CellTypeInt, IntValue: v}
+			case float32:
+				row[i] = Cell{Type: CellTypeFloat, FloatValue: v}
+			case time.Time:
+				row[i] = Cell{Type: CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
+			default:
+				return fmt.Errorf("Unsupported default value type: %T for column '%s'", value, col.Name)
+			}
 		}
 	}
 
@@ -167,15 +232,43 @@ func (b *MemoryBackend) Insert(stmt *ast.InsertStatement) error {
 	for i, col := range table.Columns {
 		if col.Primary {
 			key := row[i].String()
-			if _, exists := table.Indexes[col.Name].Values[key]; exists {
-				return fmt.Errorf("Duplicate entry '%s' for key '%s'", key, col.Name)
+			// 直接使用索引检查冲突
+			if rowIndexes, exists := table.Indexes[col.Name].Values[key]; exists {
+				// 检查这些索引指向的行是否与当前插入的行冲突
+				for _, rowIndex := range rowIndexes {
+					if rowIndex < len(table.Rows) {
+						versionedRow := table.Rows[rowIndex]
+						// 在事务上下文中检查是否存在可见的冲突行
+						visibleRow := b.getVisibleRow(versionedRow, txn)
+						if visibleRow != nil && visibleRow[i].String() == key {
+							// 存在具有相同主键的可见行，违反主键约束
+							return fmt.Errorf("Duplicate entry '%s' for key '%s'", key, col.Name)
+						}
+					}
+				}
 			}
+		}
+	}
+
+	// 创建版本化单元格
+	versionedCells := make([]VersionedCell, len(table.Columns))
+	txnID := uint64(0)
+	if txn != nil {
+		txnID = txn.ID
+	}
+
+	for i, cell := range row {
+		versionedCells[i] = VersionedCell{
+			Data:      cell,
+			TxnID:     txnID,
+			Timestamp: time.Now(),
+			Committed: txn == nil, // 如果没有事务，则立即提交（自动提交模式）
 		}
 	}
 
 	// 插入数据
 	rowIndex := len(table.Rows)
-	table.Rows = append(table.Rows, row)
+	table.Rows = append(table.Rows, versionedCells)
 
 	// 更新索引
 	for i, col := range table.Columns {
@@ -185,14 +278,82 @@ func (b *MemoryBackend) Insert(stmt *ast.InsertStatement) error {
 		}
 	}
 
+	// 记录写入的行
+	if txn != nil {
+		txn.AddToWriteSet(stmt.TableName, rowIndex)
+	}
+
 	return nil
+}
+
+// commitTransaction 提交事务中的更改
+func (b *MemoryBackend) commitTransaction(txn *Transaction) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// 遍历所有写入的表和行
+	for tableName, rows := range txn.WriteSet {
+		table, exists := b.tables[tableName]
+		if !exists {
+			continue
+		}
+
+		table.mu.Lock()
+		// 提交这些行的更改
+		for rowID := range rows {
+			if rowID < len(table.Rows) {
+				versionedRow := table.Rows[rowID]
+				if len(versionedRow) > 0 {
+					// 更新最新版本为已提交
+					latest := &versionedRow[len(versionedRow)-1]
+					if latest.TxnID == txn.ID {
+						latest.Committed = true
+						latest.Timestamp = time.Now() // 使用提交时间而不是txn.CommitTime
+					}
+				}
+			}
+		}
+		table.mu.Unlock()
+	}
+}
+
+// rollbackTransaction 回滚事务中的更改
+func (b *MemoryBackend) rollbackTransaction(txn *Transaction) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	// 遍历所有写入的表和行
+	for tableName, rows := range txn.WriteSet {
+		table, exists := b.tables[tableName]
+		if !exists {
+			continue
+		}
+
+		table.mu.Lock()
+		// 移除这些行中由该事务创建的未提交版本
+		for rowID := range rows {
+			if rowID < len(table.Rows) {
+				versionedRow := table.Rows[rowID]
+				// 移除由该事务创建的版本
+				filtered := make([]VersionedCell, 0)
+				for _, version := range versionedRow {
+					if version.TxnID != txn.ID {
+						filtered = append(filtered, version)
+					}
+				}
+				table.Rows[rowID] = filtered
+			}
+		}
+		table.mu.Unlock()
+	}
 }
 
 // Select 查询数据
 // 支持 SELECT * 、指定列和简单聚合函数
 // 处理 WHERE 条件
 // 返回查询结果
-func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
+// Select 查询数据，支持事务
+func (b *MemoryBackend) Select(stmt *ast.SelectStatement, txn *Transaction) (*Results, error) {
 	table, exists := b.tables[stmt.TableName]
 	if !exists {
 		return nil, fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
@@ -205,7 +366,7 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 
 	// 如果有 GROUP BY 子句
 	if len(stmt.GroupBy) > 0 {
-		res, err := b.selectWithGroupBy(stmt, table)
+		res, err := b.selectWithGroupBy(stmt, table, txn) // 添加 txn 参数
 		if err != nil {
 			return nil, err
 		}
@@ -311,9 +472,15 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 	if isAggregation {
 		// 处理WHERE子句
 		filteredRows := make([][]Cell, 0)
-		for _, row := range table.Rows {
+		for i, row := range table.Rows {
+			// 在事务上下文中读取最新可见版本
+			visibleRow := b.getVisibleRow(row, txn)
+			if visibleRow == nil {
+				continue
+			}
+
 			if stmt.Where != nil {
-				match, err := evaluateWhereCondition(stmt.Where, row, table.Columns)
+				match, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
 				if err != nil {
 					return nil, err
 				}
@@ -321,7 +488,12 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 					continue
 				}
 			}
-			filteredRows = append(filteredRows, row)
+			filteredRows = append(filteredRows, visibleRow)
+
+			// 记录读取的行
+			if txn != nil {
+				txn.AddToReadSet(stmt.TableName, i)
+			}
 		}
 
 		functionResult := calculateFunctionResults(aggregateFunc, table, filteredRows)
@@ -333,9 +505,15 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 
 	// 处理WHERE子句
 	filteredRows := make([][]Cell, 0)
-	for _, row := range table.Rows {
+	for i, row := range table.Rows {
+		// 在事务上下文中读取最新可见版本
+		visibleRow := b.getVisibleRow(row, txn)
+		if visibleRow == nil {
+			continue
+		}
+
 		if stmt.Where != nil {
-			match, err := evaluateWhereCondition(stmt.Where, row, table.Columns)
+			match, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
 			if err != nil {
 				return nil, err
 			}
@@ -343,7 +521,12 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 				continue
 			}
 		}
-		filteredRows = append(filteredRows, row)
+		filteredRows = append(filteredRows, visibleRow)
+
+		// 记录读取的行
+		if txn != nil {
+			txn.AddToReadSet(stmt.TableName, i)
+		}
 	}
 
 	// 构建结果行
@@ -351,11 +534,20 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 		resultRow := make([]Cell, len(results.Columns))
 		for j, col := range results.Columns {
 			// 查找列在原始行中的位置
+			found := false
 			for k, tableCol := range table.Columns {
 				if tableCol.Name == col.Name {
-					resultRow[j] = row[k]
-					break
+					// 确保索引在有效范围内
+					if k < len(row) {
+						resultRow[j] = row[k]
+						found = true
+						break
+					}
 				}
+			}
+			// 如果没找到对应的列，设置为默认值
+			if !found {
+				resultRow[j] = Cell{Type: CellTypeText, TextValue: "NULL"}
 			}
 		}
 		results.Rows = append(results.Rows, resultRow)
@@ -371,6 +563,68 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement) (*Results, error) {
 	}
 
 	return results, nil
+}
+
+// getVisibleRow 获取对当前事务可见的行版本
+func (b *MemoryBackend) getVisibleRow(versionedRow []VersionedCell, txn *Transaction) []Cell {
+	if len(versionedRow) == 0 {
+		return nil
+	}
+
+	if txn == nil {
+		// 非事务查询，只返回已提交的最新版本
+		return b.getLatestCommittedVersion(versionedRow)
+	}
+
+	// 事务查询，根据读已提交隔离级别规则
+	var visibleVersion *VersionedCell
+
+	// 查找对当前事务可见的最新版本
+	for i := len(versionedRow) - 1; i >= 0; i-- {
+		version := &versionedRow[i]
+
+		// 如果是当前事务自己的修改，可见（即使未提交）
+		if version.TxnID == txn.ID {
+			visibleVersion = version
+			break
+		}
+
+		// 对于读已提交隔离级别，只能看到已提交的数据
+		if version.Committed {
+			visibleVersion = version
+			break
+		}
+	}
+
+	if visibleVersion != nil {
+		// 返回完整的行数据
+		row := make([]Cell, len(versionedRow))
+		for i, v := range versionedRow {
+			row[i] = v.Data
+		}
+		return row
+	}
+
+	// 没有可见版本
+	return nil
+}
+
+// getLatestCommittedVersion 获取最新提交的版本
+func (b *MemoryBackend) getLatestCommittedVersion(versionedRow []VersionedCell) []Cell {
+	// 检查整行是否有提交的版本
+	// 在当前实现中，一行的所有列应该具有相同的事务ID和提交状态
+	for i := len(versionedRow) - 1; i >= 0; i-- {
+		version := &versionedRow[i]
+		if version.Committed {
+			// 找到最新提交的版本，提取整行数据
+			row := make([]Cell, len(versionedRow))
+			for j, v := range versionedRow {
+				row[j] = v.Data
+			}
+			return row
+		}
+	}
+	return nil
 }
 
 // orderBy 根据 ORDER BY 子句对结果进行排序
@@ -441,7 +695,7 @@ func (b *MemoryBackend) orderBy(rows [][]Cell, resultCols []ResultColumn, orderB
 }
 
 // selectWithGroupBy 处理带有 GROUP BY 的查询
-func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Table) (*Results, error) {
+func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Table, txn *Transaction) (*Results, error) {
 	results := &Results{
 		Columns: make([]ResultColumn, 0),
 		Rows:    make([][]Cell, 0),
@@ -504,9 +758,15 @@ func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Tabl
 
 	// 处理WHERE子句
 	filteredRows := make([][]Cell, 0)
-	for _, row := range table.Rows {
+	for i, versionedRow := range table.Rows {
+		// 在事务上下文中读取最新可见版本
+		visibleRow := b.getVisibleRow(versionedRow, txn)
+		if visibleRow == nil {
+			continue
+		}
+
 		if stmt.Where != nil {
-			match, err := evaluateWhereCondition(stmt.Where, row, table.Columns)
+			match, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
 			if err != nil {
 				return nil, err
 			}
@@ -514,7 +774,12 @@ func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Tabl
 				continue
 			}
 		}
-		filteredRows = append(filteredRows, row)
+		filteredRows = append(filteredRows, visibleRow)
+
+		// 记录读取的行
+		if txn != nil {
+			txn.AddToReadSet(stmt.TableName, i)
+		}
 	}
 
 	// 按 GROUP BY 字段分组
@@ -523,7 +788,10 @@ func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Tabl
 		// 构建分组键
 		groupKey := ""
 		for _, idx := range groupByIndices {
-			groupKey += row[idx].String() + "|"
+			// 确保索引在有效范围内
+			if idx < len(row) {
+				groupKey += row[idx].String() + "|"
+			}
 		}
 
 		// 将行添加到对应的组中
@@ -553,13 +821,19 @@ func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Tabl
 					}
 				}
 
-				if isGroupByField {
+				if isGroupByField && len(groupRows) > 0 {
 					// 对于 GROUP BY 字段，取第一个值（所有行应该相同）
+					found := false
 					for k, tableCol := range table.Columns {
-						if tableCol.Name == identifier.Value {
+						if tableCol.Name == identifier.Value && k < len(groupRows[0]) {
 							resultRow[colIndex] = groupRows[0][k]
+							found = true
 							break
 						}
+					}
+					// 如果没找到，设置为默认值
+					if !found {
+						resultRow[colIndex] = Cell{Type: CellTypeText, TextValue: "NULL"}
 					}
 				}
 				colIndex++
@@ -570,7 +844,11 @@ func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Tabl
 		for i, expr := range stmt.Fields {
 			if fn, ok := expr.(*ast.FunctionCall); ok {
 				functionResult := calculateFunctionResults(fn, table, groupRows)
-				resultRow[i] = functionResult[0]
+				if len(functionResult) > 0 {
+					resultRow[i] = functionResult[0]
+				} else {
+					resultRow[i] = Cell{Type: CellTypeText, TextValue: "NULL"}
+				}
 			}
 		}
 
@@ -873,8 +1151,8 @@ func calculateMin(fn *ast.FunctionCall, table *Table, rows [][]Cell) []Cell {
 // Update 执行UPDATE操作
 // 验证表和列存在性
 // 处理 WHERE 条件
-// 更新符合条件的行
-func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement) error {
+// Update 更新符合条件的行
+func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement, txn *Transaction) error {
 	table, ok := mb.tables[stmt.TableName]
 	if !ok {
 		return fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
@@ -895,9 +1173,15 @@ func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement) error {
 
 	// 更新符合条件的行
 	for i := range table.Rows {
+		// 获取可见行数据
+		visibleRow := mb.getVisibleRow(table.Rows[i], txn)
+		if visibleRow == nil {
+			continue
+		}
+
 		if stmt.Where != nil {
 			// 评估WHERE条件
-			result, err := evaluateWhereCondition(stmt.Where, table.Rows[i], table.Columns)
+			result, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
 			if err != nil {
 				return err
 			}
@@ -914,18 +1198,48 @@ func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement) error {
 				return err
 			}
 
+			txnID := uint64(0)
+			if txn != nil {
+				txnID = txn.ID
+			}
+
 			switch v := value.(type) {
 			case int32:
-				table.Rows[i][colIndex] = Cell{Type: CellTypeInt, IntValue: v}
+				table.Rows[i][colIndex] = VersionedCell{
+					Data:      Cell{Type: CellTypeInt, IntValue: v},
+					TxnID:     txnID,
+					Timestamp: time.Now(),
+					Committed: txn == nil, // 如果没有事务，则立即提交
+				}
 			case string:
-				table.Rows[i][colIndex] = Cell{Type: CellTypeText, TextValue: v}
+				table.Rows[i][colIndex] = VersionedCell{
+					Data:      Cell{Type: CellTypeText, TextValue: v},
+					TxnID:     txnID,
+					Timestamp: time.Now(),
+					Committed: txn == nil, // 如果没有事务，则立即提交
+				}
 			case float32:
-				table.Rows[i][colIndex] = Cell{Type: CellTypeFloat, FloatValue: v}
+				table.Rows[i][colIndex] = VersionedCell{
+					Data:      Cell{Type: CellTypeFloat, FloatValue: v},
+					TxnID:     txnID,
+					Timestamp: time.Now(),
+					Committed: txn == nil, // 如果没有事务，则立即提交
+				}
 			case time.Time:
-				table.Rows[i][colIndex] = Cell{Type: CellTypeDateTime, TimeValue: v.String()}
+				table.Rows[i][colIndex] = VersionedCell{
+					Data:      Cell{Type: CellTypeDateTime, TimeValue: v.String()},
+					TxnID:     txnID,
+					Timestamp: time.Now(),
+					Committed: txn == nil, // 如果没有事务，则立即提交
+				}
 			default:
 				return fmt.Errorf("Unsupported value type: %T for column '%s'", value, set.Column)
 			}
+		}
+
+		// 记录写入的行
+		if txn != nil {
+			txn.AddToWriteSet(stmt.TableName, i)
 		}
 	}
 
@@ -936,7 +1250,7 @@ func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement) error {
 // 验证表存在性
 // 处理 WHERE 条件
 // 删除符合条件的行
-func (mb *MemoryBackend) Delete(stmt *ast.DeleteStatement) error {
+func (mb *MemoryBackend) Delete(stmt *ast.DeleteStatement, txn *Transaction) error {
 	table, ok := mb.tables[stmt.TableName]
 	if !ok {
 		return fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
@@ -945,9 +1259,15 @@ func (mb *MemoryBackend) Delete(stmt *ast.DeleteStatement) error {
 	// 找出要删除的行
 	rowsToDelete := make([]int, 0)
 	for i := range table.Rows {
+		// 获取可见行数据
+		visibleRow := mb.getVisibleRow(table.Rows[i], txn)
+		if visibleRow == nil {
+			continue
+		}
+
 		if stmt.Where != nil {
 			// 评估WHERE条件
-			result, err := evaluateWhereCondition(stmt.Where, table.Rows[i], table.Columns)
+			result, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
 			if err != nil {
 				return err
 			}
