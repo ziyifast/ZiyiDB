@@ -57,6 +57,40 @@ type OrderByClause struct {
 func (ss *SelectStatement) statementNode()       {}
 func (ss *SelectStatement) TokenLiteral() string { return ss.Token.Literal }
 
+// CreateDatabaseStatement 表示CREATE DATABASE语句
+type CreateDatabaseStatement struct {
+	Token lexer.Token
+	Name  string
+}
+
+func (cds *CreateDatabaseStatement) statementNode()       {}
+func (cds *CreateDatabaseStatement) TokenLiteral() string { return cds.Token.Literal }
+
+// DropDatabaseStatement
+type DropDatabaseStatement struct {
+	Token lexer.Token
+	Name  string
+}
+
+func (dds *DropDatabaseStatement) statementNode()       {}
+func (dds *DropDatabaseStatement) TokenLiteral() string { return dds.Token.Literal }
+
+type UseDatabaseStatement struct {
+	Token lexer.Token
+	Name  string
+}
+
+func (uds *UseDatabaseStatement) statementNode()       {}
+func (uds *UseDatabaseStatement) TokenLiteral() string { return uds.Token.Literal }
+
+// ShowDatabasesStatement
+type ShowDatabasesStatement struct {
+	Token lexer.Token
+}
+
+func (sds *ShowDatabasesStatement) statementNode()       {}
+func (sds *ShowDatabasesStatement) TokenLiteral() string { return sds.Token.Literal }
+
 // CreateTableStatement 表示CREATE TABLE语句
 // 表示创建表的语句
 // 包含表名和列定义

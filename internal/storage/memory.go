@@ -11,13 +11,21 @@ import (
 	"sync"
 	"time"
 	"ziyi.db.com/internal/ast"
+	"ziyi.db.com/internal/context"
 )
 
-// MemoryBackend 内存存储引擎，管理所有表
-type MemoryBackend struct {
-	tables map[string]*Table
-	txnMgr *TransactionManager
+// Database 表示数据库
+type Database struct {
+	Name   string
+	Tables map[string]*Table
 	mu     sync.RWMutex
+}
+
+// MemoryBackend 内存存储引擎，管理所有数据库
+type MemoryBackend struct {
+	Databases map[string]*Database
+	txnMgr    *TransactionManager
+	Mu        sync.RWMutex
 }
 
 // Table 数据表，包含列定义、数据行和索引
@@ -51,9 +59,78 @@ type ResultColumn struct {
 // NewMemoryBackend 创建新的内存存储引擎
 func NewMemoryBackend() *MemoryBackend {
 	return &MemoryBackend{
-		tables: make(map[string]*Table),
-		txnMgr: NewTransactionManager(),
+		Databases: make(map[string]*Database),
+		txnMgr:    NewTransactionManager(),
 	}
+}
+
+// CreateDatabase 创建数据库
+func (b *MemoryBackend) CreateDatabase(stmt *ast.CreateDatabaseStatement) error {
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
+
+	if _, exists := b.Databases[stmt.Name]; exists {
+		return fmt.Errorf("database '%s' already exists", stmt.Name)
+	}
+
+	b.Databases[stmt.Name] = &Database{
+		Name:   stmt.Name,
+		Tables: make(map[string]*Table),
+	}
+
+	return nil
+}
+
+// DropDatabase 删除数据库
+func (b *MemoryBackend) DropDatabase(stmt *ast.DropDatabaseStatement) error {
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
+
+	if _, exists := b.Databases[stmt.Name]; !exists {
+		return fmt.Errorf("database '%s' does not exist", stmt.Name)
+	}
+
+	delete(b.Databases, stmt.Name)
+	return nil
+}
+
+// internal/storage/memory.go
+func (b *MemoryBackend) UseDatabase(stmt *ast.UseDatabaseStatement, connCtx context.DBContext) error {
+	b.Mu.RLock()
+	defer b.Mu.RUnlock()
+
+	if _, exists := b.Databases[stmt.Name]; !exists {
+		return fmt.Errorf("database '%s' does not exist", stmt.Name)
+	}
+
+	// 更新连接上下文中的当前数据库
+	connCtx.SetDBName(stmt.Name)
+	return nil
+}
+
+// ShowDatabases 显示所有数据库
+func (b *MemoryBackend) ShowDatabases() *Results {
+	b.Mu.RLock()
+	defer b.Mu.RUnlock()
+
+	results := &Results{
+		Columns: []ResultColumn{
+			{Name: "Database", Type: "TEXT"},
+		},
+		Rows: make([][]Cell, 0),
+	}
+
+	for dbName := range b.Databases {
+		results.Rows = append(results.Rows, []Cell{
+			{Type: CellTypeText, TextValue: dbName},
+		})
+	}
+
+	// 按名称排序
+	sort.Slice(results.Rows, func(i, j int) bool {
+		return results.Rows[i][0].TextValue < results.Rows[j][0].TextValue
+	})
+	return results
 }
 
 // BeginTransaction 开始一个新事务
@@ -62,13 +139,19 @@ func (b *MemoryBackend) BeginTransaction() *Transaction {
 }
 
 // CreateTable 创建表
-// 验证表名唯一性
-// 创建表结构
-// 为主键列创建索引
-// CreateTable 创建表
-func (b *MemoryBackend) CreateTable(stmt *ast.CreateTableStatement) error {
-	if _, exists := b.tables[stmt.TableName]; exists {
-		return fmt.Errorf("Table '%s' already exists", stmt.TableName)
+func (b *MemoryBackend) CreateTable(databaseName string, stmt *ast.CreateTableStatement) error {
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
+	db, exists := b.Databases[databaseName]
+	if !exists {
+		return fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if _, exists := db.Tables[stmt.TableName]; exists {
+		return fmt.Errorf("table '%s' already exists in database '%s'", stmt.TableName, databaseName)
 	}
 
 	table := &Table{
@@ -88,19 +171,26 @@ func (b *MemoryBackend) CreateTable(stmt *ast.CreateTableStatement) error {
 		}
 	}
 
-	b.tables[stmt.TableName] = table
+	db.Tables[stmt.TableName] = table
 	return nil
 }
 
-// 验证表存在性
-// 检查数据完整性
-// 处理主键约束
-// 维护索引
 // Insert 插入数据，支持事务
-func (b *MemoryBackend) Insert(stmt *ast.InsertStatement, txn *Transaction) error {
-	table, exists := b.tables[stmt.TableName]
-	if !exists {
-		return fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
+func (b *MemoryBackend) Insert(databaseName string, stmt *ast.InsertStatement, txn *Transaction) error {
+	b.Mu.RLock()
+	db, dbExists := b.Databases[databaseName]
+	b.Mu.RUnlock()
+
+	if !dbExists {
+		return fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+
+	db.mu.RLock()
+	table, tableExists := db.Tables[stmt.TableName]
+	db.mu.RUnlock()
+
+	if !tableExists {
+		return fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
 	}
 
 	// 获取表锁
@@ -288,17 +378,31 @@ func (b *MemoryBackend) Insert(stmt *ast.InsertStatement, txn *Transaction) erro
 
 // commitTransaction 提交事务中的更改
 func (b *MemoryBackend) commitTransaction(txn *Transaction) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 
 	// 遍历所有写入的表和行
 	for tableName, rows := range txn.WriteSet {
-		table, exists := b.tables[tableName]
-		if !exists {
+		// 在所有数据库中查找表
+		var table *Table
+		var db *Database
+		found := false
+
+		for _, database := range b.Databases {
+			database.mu.Lock()
+			if t, exists := database.Tables[tableName]; exists {
+				table = t
+				db = database
+				found = true
+				break
+			}
+			database.mu.Unlock()
+		}
+
+		if !found {
 			continue
 		}
 
-		table.mu.Lock()
 		// 提交这些行的更改
 		for rowID := range rows {
 			if rowID < len(table.Rows) {
@@ -313,23 +417,37 @@ func (b *MemoryBackend) commitTransaction(txn *Transaction) {
 				}
 			}
 		}
-		table.mu.Unlock()
+		db.mu.Unlock()
 	}
 }
 
 // rollbackTransaction 回滚事务中的更改
 func (b *MemoryBackend) rollbackTransaction(txn *Transaction) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	b.Mu.Lock()
+	defer b.Mu.Unlock()
 
 	// 遍历所有写入的表和行
 	for tableName, rows := range txn.WriteSet {
-		table, exists := b.tables[tableName]
-		if !exists {
+		// 在所有数据库中查找表
+		var table *Table
+		var db *Database
+		found := false
+
+		for _, database := range b.Databases {
+			database.mu.Lock()
+			if t, exists := database.Tables[tableName]; exists {
+				table = t
+				db = database
+				found = true
+				break
+			}
+			database.mu.Unlock()
+		}
+
+		if !found {
 			continue
 		}
 
-		table.mu.Lock()
 		// 移除这些行中由该事务创建的未提交版本
 		for rowID := range rows {
 			if rowID < len(table.Rows) {
@@ -344,19 +462,25 @@ func (b *MemoryBackend) rollbackTransaction(txn *Transaction) {
 				table.Rows[rowID] = filtered
 			}
 		}
-		table.mu.Unlock()
+		db.mu.Unlock()
 	}
 }
 
-// Select 查询数据
-// 支持 SELECT * 、指定列和简单聚合函数
-// 处理 WHERE 条件
-// 返回查询结果
 // Select 查询数据，支持事务
-func (b *MemoryBackend) Select(stmt *ast.SelectStatement, txn *Transaction) (*Results, error) {
-	table, exists := b.tables[stmt.TableName]
-	if !exists {
-		return nil, fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
+func (b *MemoryBackend) Select(databaseName string, stmt *ast.SelectStatement, txn *Transaction) (*Results, error) {
+	b.Mu.RLock()
+	db, dbExists := b.Databases[databaseName]
+	b.Mu.RUnlock()
+
+	if !dbExists {
+		return nil, fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+	db.mu.RLock()
+	table, tableExists := db.Tables[stmt.TableName]
+	db.mu.RUnlock()
+
+	if !tableExists {
+		return nil, fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
 	}
 
 	results := &Results{
@@ -366,7 +490,7 @@ func (b *MemoryBackend) Select(stmt *ast.SelectStatement, txn *Transaction) (*Re
 
 	// 如果有 GROUP BY 子句
 	if len(stmt.GroupBy) > 0 {
-		res, err := b.selectWithGroupBy(stmt, table, txn) // 添加 txn 参数
+		res, err := b.selectWithGroupBy(databaseName, stmt, table, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -695,7 +819,7 @@ func (b *MemoryBackend) orderBy(rows [][]Cell, resultCols []ResultColumn, orderB
 }
 
 // selectWithGroupBy 处理带有 GROUP BY 的查询
-func (b *MemoryBackend) selectWithGroupBy(stmt *ast.SelectStatement, table *Table, txn *Transaction) (*Results, error) {
+func (b *MemoryBackend) selectWithGroupBy(databaseName string, stmt *ast.SelectStatement, table *Table, txn *Transaction) (*Results, error) {
 	results := &Results{
 		Columns: make([]ResultColumn, 0),
 		Rows:    make([][]Cell, 0),
@@ -1148,14 +1272,22 @@ func calculateMin(fn *ast.FunctionCall, table *Table, rows [][]Cell) []Cell {
 	}
 }
 
-// Update 执行UPDATE操作
-// 验证表和列存在性
-// 处理 WHERE 条件
 // Update 更新符合条件的行
-func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement, txn *Transaction) error {
-	table, ok := mb.tables[stmt.TableName]
-	if !ok {
-		return fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
+func (b *MemoryBackend) Update(databaseName string, stmt *ast.UpdateStatement, txn *Transaction) error {
+	b.Mu.RLock()
+	db, dbExists := b.Databases[databaseName]
+	b.Mu.RUnlock()
+
+	if !dbExists {
+		return fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+
+	db.mu.RLock()
+	table, tableExists := db.Tables[stmt.TableName]
+	db.mu.RUnlock()
+
+	if !tableExists {
+		return fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
 	}
 
 	// 获取列索引
@@ -1174,7 +1306,7 @@ func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement, txn *Transaction) err
 	// 更新符合条件的行
 	for i := range table.Rows {
 		// 获取可见行数据
-		visibleRow := mb.getVisibleRow(table.Rows[i], txn)
+		visibleRow := b.getVisibleRow(table.Rows[i], txn)
 		if visibleRow == nil {
 			continue
 		}
@@ -1246,21 +1378,29 @@ func (mb *MemoryBackend) Update(stmt *ast.UpdateStatement, txn *Transaction) err
 	return nil
 }
 
-// Delete 执行DELETE操作
-// 验证表存在性
-// 处理 WHERE 条件
-// 删除符合条件的行
-func (mb *MemoryBackend) Delete(stmt *ast.DeleteStatement, txn *Transaction) error {
-	table, ok := mb.tables[stmt.TableName]
-	if !ok {
-		return fmt.Errorf("Table '%s' doesn't exist", stmt.TableName)
+// Delete 删除符合条件的行
+func (b *MemoryBackend) Delete(databaseName string, stmt *ast.DeleteStatement, txn *Transaction) error {
+	b.Mu.RLock()
+	db, dbExists := b.Databases[databaseName]
+	b.Mu.RUnlock()
+
+	if !dbExists {
+		return fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+
+	db.mu.RLock()
+	table, tableExists := db.Tables[stmt.TableName]
+	db.mu.RUnlock()
+
+	if !tableExists {
+		return fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
 	}
 
 	// 找出要删除的行
 	rowsToDelete := make([]int, 0)
 	for i := range table.Rows {
 		// 获取可见行数据
-		visibleRow := mb.getVisibleRow(table.Rows[i], txn)
+		visibleRow := b.getVisibleRow(table.Rows[i], txn)
 		if visibleRow == nil {
 			continue
 		}
@@ -1288,20 +1428,27 @@ func (mb *MemoryBackend) Delete(stmt *ast.DeleteStatement, txn *Transaction) err
 }
 
 // DropTable 删除表
-// 验证表是否存在
-// 从存储引擎中删除表
-func (mb *MemoryBackend) DropTable(stmt *ast.DropTableStatement) error {
-	if _, exists := mb.tables[stmt.TableName]; !exists {
-		return fmt.Errorf("Unknown table '%s'", stmt.TableName)
+func (b *MemoryBackend) DropTable(databaseName string, stmt *ast.DropTableStatement) error {
+	b.Mu.RLock()
+	db, dbExists := b.Databases[databaseName]
+	b.Mu.RUnlock()
+
+	if !dbExists {
+		return fmt.Errorf("database '%s' does not exist", databaseName)
 	}
 
-	delete(mb.tables, stmt.TableName)
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if _, exists := db.Tables[stmt.TableName]; !exists {
+		return fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
+	}
+
+	delete(db.Tables, stmt.TableName)
 	return nil
 }
 
 // evaluateExpression 评估表达式的值
-// 计算表达式的值
-// 处理不同类型的数据
 func evaluateExpression(expr ast.Expression) (interface{}, error) {
 	switch e := expr.(type) {
 	case *ast.IntegerLiteral:
@@ -1370,8 +1517,6 @@ func matchLikePattern(str, pattern string) bool {
 }
 
 // evaluateWhereCondition 评估WHERE条件
-// 评估 WHERE 条件
-// 支持比较运算符和 LIKE 操作符
 func evaluateWhereCondition(expr ast.Expression, row []Cell, columns []ast.ColumnDefinition) (bool, error) {
 	switch e := expr.(type) {
 	case *ast.BinaryExpression:
@@ -1711,5 +1856,3 @@ func getColumnIndex(columnName string, columns []ast.ColumnDefinition) (int, err
 	}
 	return -1, fmt.Errorf("column '%s' not found", columnName)
 }
-
-//后续拓展新的存储引擎，如落地到文件...

@@ -18,20 +18,28 @@ const DefaultPort = "3118"
 type Server struct {
 	backend     *storage.MemoryBackend
 	port        string
-	connections map[net.Conn]*serverConnection
+	connections map[net.Conn]*ServerConnection
 	connMutex   sync.RWMutex
 }
 
-type serverConnection struct {
+type ServerConnection struct {
 	txn *storage.Transaction
+	db  string
 	mu  sync.RWMutex
 }
 
+func (s *ServerConnection) GetDBName() string {
+	return s.db
+}
+
+func (s *ServerConnection) SetDBName(dbName string) {
+	s.db = dbName
+}
 func NewServer(backend *storage.MemoryBackend, port string) *Server {
 	return &Server{
 		backend:     backend,
 		port:        port,
-		connections: make(map[net.Conn]*serverConnection),
+		connections: make(map[net.Conn]*ServerConnection),
 	}
 }
 
@@ -52,7 +60,9 @@ func (s *Server) Start() error {
 
 		// 为每个连接创建连接上下文
 		s.connMutex.Lock()
-		s.connections[conn] = &serverConnection{}
+		s.connections[conn] = &ServerConnection{
+			db: "",
+		}
 		s.connMutex.Unlock()
 
 		// 启动goroutine处理连接
@@ -136,7 +146,6 @@ func (s *Server) executeCommand(conn net.Conn, command string) string {
 		connCtx.txn = nil
 		return fmt.Sprintf("Transaction %d rolled back", txnID)
 	}
-
 	// 处理SQL命令
 	l := lexer.NewLexer(strings.NewReader(command))
 	p := parser.NewParser(l)
@@ -148,40 +157,78 @@ func (s *Server) executeCommand(conn net.Conn, command string) string {
 
 	var result string
 	for _, statement := range parsedStmt.Statements {
+		//检查是否选择了数据库
+		if connCtx.GetDBName() == "" {
+			// 检查是否是非数据库操作语句
+			_, isCreateDB := statement.(*ast.CreateDatabaseStatement)
+			_, isShowDBs := statement.(*ast.ShowDatabasesStatement)
+			_, isDropDB := statement.(*ast.DropDatabaseStatement)
+			_, isUseDB := statement.(*ast.UseDatabaseStatement)
+			// 如果不是允许的语句类型，则提示需要选择数据库
+			if !isCreateDB && !isShowDBs && !isDropDB && !isUseDB {
+				result += "No database selected. Use 'USE database_name' to select a database."
+				continue
+			}
+		}
 		switch stmt := statement.(type) {
+		case *ast.CreateDatabaseStatement:
+			if err := s.backend.CreateDatabase(stmt); err != nil {
+				result += fmt.Sprintf("Error: %v\n", err)
+			} else {
+				result += "Database created successfully\n"
+			}
+		case *ast.DropDatabaseStatement:
+			if err := s.backend.DropDatabase(stmt); err != nil {
+				result += fmt.Sprintf("Error: %v\n", err)
+			} else {
+				result += "Database dropped successfully\n"
+			}
+		case *ast.UseDatabaseStatement:
+			if err := s.backend.UseDatabase(stmt, connCtx); err != nil {
+				result += fmt.Sprintf("Error: %v\n", err)
+			} else {
+				result += fmt.Sprintf("Database changed to '%s'\n", stmt.Name)
+			}
+		case *ast.ShowDatabasesStatement:
+			results := s.backend.ShowDatabases()
+			if err != nil {
+				result += fmt.Sprintf("Error: %v\n", err)
+			} else {
+				result += formatResults(results) + "\n"
+			}
 		case *ast.CreateTableStatement:
-			if err := s.backend.CreateTable(stmt); err != nil {
+			if err := s.backend.CreateTable(connCtx.db, stmt); err != nil {
 				result += fmt.Sprintf("Error: %v\n", err)
 			} else {
 				result += "Table created successfully\n"
 			}
 		case *ast.InsertStatement:
-			if err := s.backend.Insert(stmt, connCtx.txn); err != nil {
+			if err := s.backend.Insert(connCtx.db, stmt, connCtx.txn); err != nil {
 				result += fmt.Sprintf("Error: %v\n", err)
 			} else {
 				result += "1 row inserted\n"
 			}
 		case *ast.SelectStatement:
-			results, err := s.backend.Select(stmt, connCtx.txn)
+			results, err := s.backend.Select(connCtx.db, stmt, connCtx.txn)
 			if err != nil {
 				result += fmt.Sprintf("Error: %v\n", err)
 			} else {
 				result += formatResults(results) + "\n"
 			}
 		case *ast.UpdateStatement:
-			if err := s.backend.Update(stmt, connCtx.txn); err != nil {
+			if err := s.backend.Update(connCtx.db, stmt, connCtx.txn); err != nil {
 				result += fmt.Sprintf("Error: %v\n", err)
 			} else {
 				result += "Query OK\n"
 			}
 		case *ast.DeleteStatement:
-			if err := s.backend.Delete(stmt, connCtx.txn); err != nil {
+			if err := s.backend.Delete(connCtx.db, stmt, connCtx.txn); err != nil {
 				result += fmt.Sprintf("Error: %v\n", err)
 			} else {
 				result += "Query OK\n"
 			}
 		case *ast.DropTableStatement:
-			if err := s.backend.DropTable(stmt); err != nil {
+			if err := s.backend.DropTable(connCtx.db, stmt); err != nil {
 				result += fmt.Sprintf("Error: %v\n", err)
 			} else {
 				result += "Table dropped successfully\n"

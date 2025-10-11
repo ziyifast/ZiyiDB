@@ -75,8 +75,21 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		p.nextToken()
 	}
 	switch p.curToken.Type {
+	//需要区分是创建表还是创建数据库
 	case lexer.CREATE:
-		return p.parseCreateTableStatement()
+		if p.peekTokenIs(lexer.TABLE) {
+			return p.parseCreateTableStatement()
+		} else if p.peekTokenIs(lexer.DATABASE) {
+			return p.parseCreateDatabaseStatement()
+		}
+		return nil, fmt.Errorf("expected TABLE or DATABASE after CREATE")
+	case lexer.SHOW:
+		if p.peekTokenIs(lexer.DATABASES) {
+			return p.parseShowDatabasesStatement()
+		}
+		return nil, fmt.Errorf("expected DATABASES after SHOW")
+	case lexer.USE:
+		return p.parseUseDatabaseStatement()
 	case lexer.INSERT:
 		return p.parseInsertStatement()
 	case lexer.SELECT:
@@ -86,12 +99,70 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 	case lexer.DELETE:
 		return p.parseDeleteStatement()
 	case lexer.DROP:
-		return p.parseDropTableStatement()
+		if p.peekTokenIs(lexer.TABLE) {
+			return p.parseDropTableStatement()
+		} else if p.peekTokenIs(lexer.DATABASE) {
+			return p.parseDropDatabaseStatement()
+		}
+		return nil, fmt.Errorf("expected TABLE or DATABASE after DROP")
 	case lexer.SEMI:
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Type)
 	}
+}
+
+// parseDropDatabaseStatement 解析DROP DATABASE语句
+func (p *Parser) parseDropDatabaseStatement() (*ast.DropDatabaseStatement, error) {
+	stmt := &ast.DropDatabaseStatement{Token: p.curToken}
+
+	if !p.expectPeek(lexer.DATABASE) {
+		return nil, fmt.Errorf("expected DATABASE keyword")
+	}
+
+	if !p.expectPeek(lexer.IDENT) {
+		return nil, fmt.Errorf("expected database name")
+	}
+
+	stmt.Name = p.curToken.Literal
+	return stmt, nil
+}
+func (p *Parser) parseUseDatabaseStatement() (*ast.UseDatabaseStatement, error) {
+	stmt := &ast.UseDatabaseStatement{Token: p.curToken}
+
+	if !p.expectPeek(lexer.IDENT) {
+		return nil, fmt.Errorf("expected database name")
+	}
+
+	stmt.Name = p.curToken.Literal
+	return stmt, nil
+}
+
+// parseShowDatabasesStatement 解析SHOW DATABASES语句
+func (p *Parser) parseShowDatabasesStatement() (*ast.ShowDatabasesStatement, error) {
+	stmt := &ast.ShowDatabasesStatement{Token: p.curToken}
+
+	if !p.expectPeek(lexer.DATABASES) {
+		return nil, fmt.Errorf("expected DATABASES keyword")
+	}
+
+	return stmt, nil
+}
+
+// parseCreateDatabaseStatement 解析CREATE DATABASE语句
+func (p *Parser) parseCreateDatabaseStatement() (*ast.CreateDatabaseStatement, error) {
+	stmt := &ast.CreateDatabaseStatement{Token: p.curToken}
+
+	if !p.expectPeek(lexer.DATABASE) {
+		return nil, fmt.Errorf("expected DATABASE keyword")
+	}
+
+	if !p.expectPeek(lexer.IDENT) {
+		return nil, fmt.Errorf("expected database name")
+	}
+
+	stmt.Name = p.curToken.Literal
+	return stmt, nil
 }
 
 // parseCreateTableStatement 解析CREATE TABLE语句

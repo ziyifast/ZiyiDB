@@ -236,6 +236,14 @@ func (l *Lexer) lookupIdentifier(ident string) TokenType {
 		return ASC
 	case "DESC":
 		return DESC
+	case "DATABASE":
+		return DATABASE
+	case "DATABASES":
+		return DATABASES
+	case "SHOW":
+		return SHOW
+	case "USE":
+		return USE
 	default:
 		return IDENT
 	}
