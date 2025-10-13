@@ -94,7 +94,7 @@ func (b *MemoryBackend) DropDatabase(stmt *ast.DropDatabaseStatement) error {
 	return nil
 }
 
-// internal/storage/memory.go
+// UseDatabase 使用数据库
 func (b *MemoryBackend) UseDatabase(stmt *ast.UseDatabaseStatement, connCtx context.DBContext) error {
 	b.Mu.RLock()
 	defer b.Mu.RUnlock()
@@ -123,6 +123,35 @@ func (b *MemoryBackend) ShowDatabases() *Results {
 	for dbName := range b.Databases {
 		results.Rows = append(results.Rows, []Cell{
 			{Type: CellTypeText, TextValue: dbName},
+		})
+	}
+
+	// 按名称排序
+	sort.Slice(results.Rows, func(i, j int) bool {
+		return results.Rows[i][0].TextValue < results.Rows[j][0].TextValue
+	})
+	return results
+}
+
+// ShowTables 显示数据库中的所有表
+func (b *MemoryBackend) ShowTables(connCtx context.DBContext) *Results {
+	b.Mu.RLock()
+	defer b.Mu.RUnlock()
+	results := &Results{
+		Columns: []ResultColumn{
+			{Name: "Tables", Type: "TEXT"},
+		},
+		Rows: make([][]Cell, 0),
+	}
+	dbName := connCtx.GetDBName()
+	if dbName == "" {
+		return results
+	}
+	database := b.Databases[dbName]
+
+	for tableName := range database.Tables {
+		results.Rows = append(results.Rows, []Cell{
+			{Type: CellTypeText, TextValue: tableName},
 		})
 	}
 

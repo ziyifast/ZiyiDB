@@ -108,8 +108,9 @@ func executor(t string) {
 				_, isShowDBs := statement.(*ast.ShowDatabasesStatement)
 				_, isDropDB := statement.(*ast.DropDatabaseStatement)
 				_, isUseDB := statement.(*ast.UseDatabaseStatement)
+				_, isShowTables := statement.(*ast.ShowTablesStatement)
 				// 如果不是允许的语句类型，则提示需要选择数据库
-				if !isCreateDB && !isShowDBs && !isDropDB && !isUseDB {
+				if !isCreateDB && !isShowDBs && !isDropDB && !isUseDB && !isShowTables {
 					fmt.Println("No database selected. Use 'USE database_name' to select a database.")
 					continue
 				}
@@ -129,6 +130,9 @@ func executor(t string) {
 				}
 			case *ast.ShowDatabasesStatement:
 				result := backend.ShowDatabases()
+				printResults(result)
+			case *ast.ShowTablesStatement:
+				result := backend.ShowTables(&dbContextAdapter{&currentDatabase})
 				printResults(result)
 			case *ast.UseDatabaseStatement:
 				if err := backend.UseDatabase(s, &dbContextAdapter{&currentDatabase}); err != nil {

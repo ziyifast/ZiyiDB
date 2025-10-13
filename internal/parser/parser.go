@@ -87,6 +87,9 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		if p.peekTokenIs(lexer.DATABASES) {
 			return p.parseShowDatabasesStatement()
 		}
+		if p.peekTokenIs(lexer.TABLES) {
+			return p.parseShowTablesStatement()
+		}
 		return nil, fmt.Errorf("expected DATABASES after SHOW")
 	case lexer.USE:
 		return p.parseUseDatabaseStatement()
@@ -144,6 +147,17 @@ func (p *Parser) parseShowDatabasesStatement() (*ast.ShowDatabasesStatement, err
 
 	if !p.expectPeek(lexer.DATABASES) {
 		return nil, fmt.Errorf("expected DATABASES keyword")
+	}
+
+	return stmt, nil
+}
+
+// parseShowTablesStatement 解析SHOW TABLES语句
+func (p *Parser) parseShowTablesStatement() (*ast.ShowTablesStatement, error) {
+	stmt := &ast.ShowTablesStatement{Token: p.curToken}
+
+	if !p.expectPeek(lexer.TABLES) {
+		return nil, fmt.Errorf("expected TABLES keyword")
 	}
 
 	return stmt, nil

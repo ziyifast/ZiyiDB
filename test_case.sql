@@ -156,7 +156,7 @@ select * from users;
 ROLLBACK;
 
 ---- 第七期 实现数据库的创建、操作、表的管理等
- create database test;
+create database test;
 create database test2;
 show databases;
 -- 使用数据库test并创建表
@@ -175,8 +175,10 @@ drop database test;
 -- 查看删除后的数据库列表
 show databases;
 
-
-
-
-
-todo::注释符优化
+-- test2数据库创建多个表，查看show tables;命令
+use test2;
+create table users (id INT PRIMARY KEY,name text,age INT);
+insert into users values (1, 'Tom', 20);
+create table products (id INT PRIMARY KEY,name text,price FLOAT);
+insert into products values (1, 'Apple', 10.5);
+show tables;

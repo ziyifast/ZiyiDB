@@ -164,8 +164,9 @@ func (s *Server) executeCommand(conn net.Conn, command string) string {
 			_, isShowDBs := statement.(*ast.ShowDatabasesStatement)
 			_, isDropDB := statement.(*ast.DropDatabaseStatement)
 			_, isUseDB := statement.(*ast.UseDatabaseStatement)
+			_, isShowTables := statement.(*ast.ShowTablesStatement)
 			// 如果不是允许的语句类型，则提示需要选择数据库
-			if !isCreateDB && !isShowDBs && !isDropDB && !isUseDB {
+			if !isCreateDB && !isShowDBs && !isDropDB && !isUseDB && !isShowTables {
 				result += "No database selected. Use 'USE database_name' to select a database."
 				continue
 			}
@@ -191,6 +192,13 @@ func (s *Server) executeCommand(conn net.Conn, command string) string {
 			}
 		case *ast.ShowDatabasesStatement:
 			results := s.backend.ShowDatabases()
+			if err != nil {
+				result += fmt.Sprintf("Error: %v\n", err)
+			} else {
+				result += formatResults(results) + "\n"
+			}
+		case *ast.ShowTablesStatement:
+			results := s.backend.ShowTables(connCtx)
 			if err != nil {
 				result += fmt.Sprintf("Error: %v\n", err)
 			} else {

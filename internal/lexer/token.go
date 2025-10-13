@@ -37,6 +37,7 @@ const (
 	DATABASES TokenType = "DATABASES"
 	SHOW      TokenType = "SHOW"
 	USE       TokenType = "USE"
+	TABLES    TokenType = "TABLES"
 
 	// 标识符和字面量
 	IDENT    TokenType = "IDENT" // 标识符（如列名、表名、函数名）

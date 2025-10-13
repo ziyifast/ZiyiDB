@@ -91,6 +91,14 @@ type ShowDatabasesStatement struct {
 func (sds *ShowDatabasesStatement) statementNode()       {}
 func (sds *ShowDatabasesStatement) TokenLiteral() string { return sds.Token.Literal }
 
+// ShowTablesStatement
+type ShowTablesStatement struct {
+	Token lexer.Token
+}
+
+func (sds *ShowTablesStatement) statementNode()       {}
+func (sds *ShowTablesStatement) TokenLiteral() string { return sds.Token.Literal }
+
 // CreateTableStatement 表示CREATE TABLE语句
 // 表示创建表的语句
 // 包含表名和列定义
