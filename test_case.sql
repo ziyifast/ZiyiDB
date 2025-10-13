@@ -1,4 +1,4 @@
----- 第一期 基础功能测试
+ ---- 第一期 基础功能测试
 -- 1. 创建表
 CREATE TABLE users (id INT PRIMARY KEY,name TEXT,age INT);
 
@@ -155,8 +155,30 @@ INSERT INTO users VALUES (1, 'Alice', 25);
 select * from users;
 ROLLBACK;
 
+---- 第七期 实现数据库的创建、操作、表的管理等
+create database test;
+create database test2;
+show databases;
+-- 使用数据库test并创建表
+use test;
+create table users (id INT PRIMARY KEY,name text,age INT);
+INSERT INTO users VALUES (1, 'Alice', 20);
+INSERT INTO users VALUES (2, 'Bob', 25);
+select * from users;
+-- 预期test2数据库中没有users表
+use test2;
+select * from users;
+-- 查看所有数据库
+show databases;
+-- 删除数据库test
+drop database test;
+-- 查看删除后的数据库列表
+show databases;
 
-
-
-
-
+-- test2数据库创建多个表，查看show tables;命令
+use test2;
+create table users (id INT PRIMARY KEY,name text,age INT);
+insert into users values (1, 'Tom', 20);
+create table products (id INT PRIMARY KEY,name text,price FLOAT);
+insert into products values (1, 'Apple', 10.5);
+show tables;

@@ -19,8 +19,20 @@ var history []string                // 存储命令历史
 var backend *storage.MemoryBackend  // 存储引擎实例
 var currentTxn *storage.Transaction // 当前事务
 var historyIndex int                // 当前历史记录索引
+var currentDatabase string          // 当前用户选择的数据库
 
-// 处理用户输入的命令
+type dbContextAdapter struct {
+	dbName *string
+}
+
+func (d *dbContextAdapter) GetDBName() string {
+	return *d.dbName
+}
+
+func (d *dbContextAdapter) SetDBName(dbName string) {
+	*d.dbName = dbName
+}
+
 func executor(t string) {
 	// 分割多个SQL语句（用分号分隔）
 	statements := strings.Split(t, ";")
@@ -73,7 +85,6 @@ func executor(t string) {
 				fmt.Printf("Transaction %d rolled back\n", currentTxn.ID)
 			}
 			currentTxn = nil
-			continue
 		}
 
 		// 创建词法分析器
@@ -91,40 +102,77 @@ func executor(t string) {
 
 		// 执行SQL语句
 		for _, statement := range parsedStmt.Statements {
+			if currentDatabase == "" {
+				// 检查是否是非数据库操作语句
+				_, isCreateDB := statement.(*ast.CreateDatabaseStatement)
+				_, isShowDBs := statement.(*ast.ShowDatabasesStatement)
+				_, isDropDB := statement.(*ast.DropDatabaseStatement)
+				_, isUseDB := statement.(*ast.UseDatabaseStatement)
+				_, isShowTables := statement.(*ast.ShowTablesStatement)
+				// 如果不是允许的语句类型，则提示需要选择数据库
+				if !isCreateDB && !isShowDBs && !isDropDB && !isUseDB && !isShowTables {
+					fmt.Println("No database selected. Use 'USE database_name' to select a database.")
+					continue
+				}
+			}
 			switch s := statement.(type) {
+			case *ast.CreateDatabaseStatement:
+				if err := backend.CreateDatabase(s); err != nil {
+					fmt.Printf("Error: %v\n", err)
+				} else {
+					fmt.Println("Database created successfully")
+				}
+			case *ast.DropDatabaseStatement:
+				if err := backend.DropDatabase(s); err != nil {
+					fmt.Printf("Error: %v\n", err)
+				} else {
+					fmt.Println("Database dropped successfully")
+				}
+			case *ast.ShowDatabasesStatement:
+				result := backend.ShowDatabases()
+				printResults(result)
+			case *ast.ShowTablesStatement:
+				result := backend.ShowTables(&dbContextAdapter{&currentDatabase})
+				printResults(result)
+			case *ast.UseDatabaseStatement:
+				if err := backend.UseDatabase(s, &dbContextAdapter{&currentDatabase}); err != nil {
+					fmt.Printf("Error: %v\n", err)
+				} else {
+					fmt.Printf("Database changed to '%s'\n", currentDatabase)
+				}
 			case *ast.CreateTableStatement:
-				if err := backend.CreateTable(s); err != nil {
+				if err := backend.CreateTable(currentDatabase, s); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				} else {
 					fmt.Println("Table created successfully")
 				}
 			case *ast.InsertStatement:
-				if err := backend.Insert(s, currentTxn); err != nil {
+				if err := backend.Insert(currentDatabase, s, currentTxn); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				} else {
 					fmt.Println("1 row inserted")
 				}
 			case *ast.SelectStatement:
-				results, err := backend.Select(s, currentTxn)
+				results, err := backend.Select(currentDatabase, s, currentTxn)
 				if err != nil {
 					fmt.Printf("Error: %v\n", err)
 				} else {
 					printResults(results)
 				}
 			case *ast.UpdateStatement:
-				if err := backend.Update(s, currentTxn); err != nil {
+				if err := backend.Update(currentDatabase, s, currentTxn); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				} else {
 					fmt.Println("Query OK")
 				}
 			case *ast.DeleteStatement:
-				if err := backend.Delete(s, currentTxn); err != nil {
+				if err := backend.Delete(currentDatabase, s, currentTxn); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				} else {
 					fmt.Println("Query OK")
 				}
 			case *ast.DropTableStatement:
-				if err := backend.DropTable(s); err != nil {
+				if err := backend.DropTable(currentDatabase, s); err != nil {
 					fmt.Printf("Error: %v\n", err)
 				} else {
 					fmt.Println("Table dropped successfully")
