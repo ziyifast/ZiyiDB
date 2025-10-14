@@ -73,6 +73,22 @@ func (l *Lexer) NextToken() Token {
 		tok = Token{Type: RPAREN, Literal: ")"}
 	case '*':
 		tok = Token{Type: ASTERISK, Literal: "*"}
+	case '.':
+		// 检查是否是数字的一部分（小数点）
+		if isDigit(l.peekChar()) {
+			// 以点开头的小数，如 .123
+			num := l.readNumber()
+			if strings.Contains(num, ".") {
+				tok.Type = FLOAT
+			} else {
+				tok.Type = INT
+			}
+			tok.Literal = num
+			return tok
+		} else {
+			// 单独的点操作符，用于表名.列名
+			tok = Token{Type: DOT, Literal: "."}
+		}
 	case '\'':
 		tok.Type = STRING
 		// 读取字符串字面量
@@ -91,7 +107,7 @@ func (l *Lexer) NextToken() Token {
 			// 将读取到的标识符转换为对应的标记类型(转换为对应tokenType)
 			tok.Type = l.lookupIdentifier(tok.Literal)
 			return tok
-		} else if isDigit(l.ch) || l.ch == '.' { // 支持以小数点开头的浮点数（如.123）
+		} else if isDigit(l.ch) { // 支持以数字开头的数字
 			num := l.readNumber()
 			if strings.Contains(num, ".") {
 				tok.Type = FLOAT
@@ -154,6 +170,13 @@ func (l *Lexer) readIdentifier() string {
 // 读取数字：支持对浮点数的读取
 func (l *Lexer) readNumber() string {
 	var num bytes.Buffer
+
+	// 如果以点开始，但下一个字符不是数字，则不是数字
+	if l.ch == '.' && !isDigit(l.peekChar()) {
+		// 这是一个点操作符，不是数字的一部分
+		return ""
+	}
+
 	hasDecimal := false
 	for (isDigit(l.ch) || (l.ch == '.' && !hasDecimal)) && l.ch != 0 {
 		if l.ch == '.' {
@@ -246,6 +269,16 @@ func (l *Lexer) lookupIdentifier(ident string) TokenType {
 		return USE
 	case "TABLES":
 		return TABLES
+	case "INNER":
+		return INNER
+	case "LEFT":
+		return LEFT
+	case "RIGHT":
+		return RIGHT
+	case "JOIN":
+		return JOIN
+	case "ON":
+		return ON
 	default:
 		return IDENT
 	}

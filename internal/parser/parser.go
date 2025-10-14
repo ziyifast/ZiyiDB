@@ -362,6 +362,15 @@ func (p *Parser) parseSelectStatement() (*ast.SelectStatement, error) {
 	}
 	stmt.TableName = p.curToken.Literal
 
+	// 解析JOIN子句
+	if p.peekTokenIs(lexer.INNER) || p.peekTokenIs(lexer.LEFT) || p.peekTokenIs(lexer.RIGHT) {
+		joinClause, err := p.parseJoinClause()
+		if err != nil {
+			return nil, err
+		}
+		stmt.Join = joinClause
+	}
+
 	// 解析WHERE子句
 	if p.peekTokenIs(lexer.WHERE) {
 		p.nextToken()
@@ -409,6 +418,49 @@ func (p *Parser) parseSelectStatement() (*ast.SelectStatement, error) {
 	}
 
 	return stmt, nil
+}
+
+// parseJoinClause 解析JOIN子句
+func (p *Parser) parseJoinClause() (*ast.JoinClause, error) {
+	joinClause := &ast.JoinClause{Token: p.curToken}
+	p.nextToken()
+	switch p.curToken.Type {
+	case lexer.INNER:
+		joinClause.JoinType = "INNER"
+		if !p.expectPeek(lexer.JOIN) {
+			return nil, fmt.Errorf("expected JOIN after INNER")
+		}
+	case lexer.LEFT:
+		joinClause.JoinType = "LEFT"
+		if !p.expectPeek(lexer.JOIN) {
+			return nil, fmt.Errorf("expected JOIN after LEFT")
+		}
+	case lexer.RIGHT:
+		joinClause.JoinType = "RIGHT"
+		if !p.expectPeek(lexer.JOIN) {
+			return nil, fmt.Errorf("expected JOIN after RIGHT")
+		}
+	default:
+		return nil, fmt.Errorf("unexpected token in JOIN clause: %s", p.curToken.Type)
+	}
+	// 解析表名
+	if !p.expectPeek(lexer.IDENT) {
+		return nil, fmt.Errorf("expected table name after JOIN")
+	}
+	joinClause.TableName = p.curToken.Literal
+	if !p.expectPeek(lexer.ON) {
+		return nil, fmt.Errorf("expected ON after table name")
+	}
+
+	// 解析ON条件表达式
+	p.nextToken()
+	onExpr, err := p.parseJoinOnCondition()
+	if err != nil {
+		return nil, err
+	}
+	joinClause.On = onExpr
+
+	return joinClause, nil
 }
 
 // parseOrderByClause 解析ORDER BY子句
@@ -610,9 +662,29 @@ func (p *Parser) parseExpression() (ast.Expression, error) {
 	case lexer.ASTERISK:
 		return &ast.StarExpression{}, nil
 	case lexer.IDENT:
+		// 检查是否是表名.列名的形式
+		if p.peekTokenIs(lexer.DOT) {
+			tableName := p.curToken.Literal
+			p.nextToken() // 消费 DOT
+			p.nextToken() // 移动到列名
+
+			if !p.curTokenIs(lexer.IDENT) {
+				return nil, fmt.Errorf("Expected column name after dot")
+			}
+
+			// 创建一个特殊的标识符，包含表名和列名
+			qualifiedName := fmt.Sprintf("%s.%s", tableName, p.curToken.Literal)
+			return &ast.Identifier{
+				Token: p.curToken,
+				Value: qualifiedName,
+			}, nil
+		}
+
+		// 检查是否是函数调用
 		if p.peekTokenIs(lexer.LPAREN) {
 			return p.parseFunctionCall()
 		}
+		// 普通标识符
 		return &ast.Identifier{
 			Token: p.curToken,
 			Value: p.curToken.Literal,
@@ -641,17 +713,43 @@ func (p *Parser) expectPeek(t lexer.TokenType) bool {
 	return false
 }
 
+// parseJoinOnCondition 解析JOIN的ON条件
+func (p *Parser) parseJoinOnCondition() (ast.Expression, error) {
+	// 解析左操作数
+	left, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+	p.nextToken()
+	// 检查是否有操作符
+	if !p.isBasicOperator() {
+		return nil, fmt.Errorf("expected operator in JOIN ON condition")
+	}
+
+	operator := p.curToken
+	p.nextToken()
+
+	// 解析右操作数
+	right, err := p.parseExpression()
+	if err != nil {
+		return nil, err
+	}
+
+	return &ast.BinaryExpression{
+		Token:    operator,
+		Left:     left,
+		Operator: operator.Literal,
+		Right:    right,
+	}, nil
+}
+
 // parseWhereClause 解析WHERE子句
 func (p *Parser) parseWhereClause() (ast.Expression, error) {
 	p.nextToken() //消费where关键字
 	// 解析左操作数（列名）
-	if !p.curTokenIs(lexer.IDENT) {
-		return nil, fmt.Errorf("You have an error in your SQL syntax; check the manual that corresponds to your db server version for the right syntax to use near '%s'", p.curToken.Literal)
-	}
-
-	left := &ast.Identifier{
-		Token: p.curToken,
-		Value: p.curToken.Literal,
+	left, err := p.parseExpression() // 使用parseExpression来支持表名.列名
+	if err != nil {
+		return nil, err
 	}
 
 	// 检查下一个是否为 BETWEEN 操作符
