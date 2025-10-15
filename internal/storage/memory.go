@@ -511,6 +511,10 @@ func (b *MemoryBackend) Select(databaseName string, stmt *ast.SelectStatement, t
 	if !tableExists {
 		return nil, fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
 	}
+	// 判断是否有表连接操作
+	if stmt.Join != nil {
+		return b.selectWithJoin(databaseName, stmt, txn)
+	}
 
 	results := &Results{
 		Columns: make([]ResultColumn, 0),
@@ -716,6 +720,350 @@ func (b *MemoryBackend) Select(databaseName string, stmt *ast.SelectStatement, t
 	}
 
 	return results, nil
+}
+
+// selectWithJoin 处理JOIN查询
+func (b *MemoryBackend) selectWithJoin(databaseName string, stmt *ast.SelectStatement, txn *Transaction) (*Results, error) {
+	b.Mu.RLock()
+	db, dbExists := b.Databases[databaseName]
+	b.Mu.RUnlock()
+
+	if !dbExists {
+		return nil, fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+
+	// 获取左表
+	db.mu.RLock()
+	leftTable, leftTableExists := db.Tables[stmt.TableName]
+	db.mu.RUnlock()
+	if !leftTableExists {
+		return nil, fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
+	}
+	// 获取右表
+	db.mu.RLock()
+	rightTable, rightTableExists := db.Tables[stmt.Join.TableName]
+	db.mu.RUnlock()
+
+	if !rightTableExists {
+		return nil, fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.Join.TableName, databaseName)
+	}
+
+	// 构建结果列
+	results := &Results{
+		Columns: make([]ResultColumn, 0),
+		Rows:    make([][]Cell, 0),
+	}
+	// 创建列映射，用于后续过滤行数据
+	columnMap := make(map[string]int) // 列名到索引的映射
+
+	// 处理SELECT * 情况
+	if len(stmt.Fields) == 1 {
+		if _, ok := stmt.Fields[0].(*ast.StarExpression); ok {
+			// 添加左表的所有列
+			for i, col := range leftTable.Columns {
+				columnName := fmt.Sprintf("%s.%s", stmt.TableName, col.Name)
+				results.Columns = append(results.Columns, ResultColumn{
+					Name: columnName,
+					Type: col.Type,
+				})
+				columnMap[columnName] = i
+			}
+			// 添加右表的所有列
+			for i, col := range rightTable.Columns {
+				columnName := fmt.Sprintf("%s.%s", stmt.Join.TableName, col.Name)
+				results.Columns = append(results.Columns, ResultColumn{
+					Name: columnName,
+					Type: col.Type,
+				})
+				columnMap[columnName] = len(leftTable.Columns) + i
+			}
+		}
+	} else {
+		// 处理具体列的选择
+		for _, expr := range stmt.Fields {
+			if identifier, ok := expr.(*ast.Identifier); ok {
+				// 处理带表名前缀的列名 (table.column)
+				parts := strings.Split(identifier.Value, ".")
+				var tableName, columnName string
+
+				if len(parts) == 2 {
+					tableName = parts[0]
+					columnName = parts[1]
+				} else {
+					// 不带表名前缀的列名
+					columnName = identifier.Value
+					// 先在左表中查找
+					found := false
+					for _, col := range leftTable.Columns {
+						if col.Name == columnName {
+							tableName = stmt.TableName
+							found = true
+							break
+						}
+					}
+					// 如果左表中没找到，在右表中查找
+					if !found {
+						for _, col := range rightTable.Columns {
+							if col.Name == columnName {
+								tableName = stmt.Join.TableName
+								found = true
+								break
+							}
+						}
+					}
+
+					if !found {
+						return nil, fmt.Errorf("Unknown column '%s' in 'field list'", identifier.Value)
+					}
+				}
+
+				// 查找对应的表和列
+				var _ *Table
+				var tableColumns []ast.ColumnDefinition
+				if tableName == stmt.TableName {
+					_ = leftTable
+					tableColumns = leftTable.Columns
+				} else if tableName == stmt.Join.TableName {
+					_ = rightTable
+					tableColumns = rightTable.Columns
+				} else {
+					return nil, fmt.Errorf("Unknown table '%s' in field list", tableName)
+				}
+
+				found := false
+				for i, col := range tableColumns {
+					if col.Name == columnName {
+						results.Columns = append(results.Columns, ResultColumn{
+							Name: identifier.Value, // 保持原始名称（可能包含表前缀）
+							Type: col.Type,
+						})
+
+						// 计算在组合行中的索引位置
+						if tableName == stmt.TableName {
+							columnMap[identifier.Value] = i
+						} else {
+							columnMap[identifier.Value] = len(leftTable.Columns) + i
+						}
+						found = true
+						break
+					}
+				}
+				if !found {
+					return nil, fmt.Errorf("Unknown column '%s' in 'field list'", identifier.Value)
+				}
+			}
+		}
+	}
+
+	// 获取左表和右表的所有行
+	leftRows := make([][]Cell, 0)
+	rightRows := make([][]Cell, 0)
+
+	// 获取左表可见行
+	for _, row := range leftTable.Rows {
+		visibleRow := b.getVisibleRow(row, txn)
+		if visibleRow != nil {
+			leftRows = append(leftRows, visibleRow)
+		}
+	}
+
+	// 获取右表可见行
+	for _, row := range rightTable.Rows {
+		visibleRow := b.getVisibleRow(row, txn)
+		if visibleRow != nil {
+			rightRows = append(rightRows, visibleRow)
+		}
+	}
+
+	// 执行JOIN操作
+	var joinedRows [][]Cell
+	switch stmt.Join.JoinType {
+	case "INNER":
+		joinedRows = b.innerJoin(leftRows, rightRows, leftTable, rightTable, stmt.Join.On, stmt.Where)
+	case "LEFT":
+		joinedRows = b.leftJoin(leftRows, rightRows, leftTable, rightTable, stmt.Join.On, stmt.Where)
+	case "RIGHT":
+		joinedRows = b.rightJoin(leftRows, rightRows, leftTable, rightTable, stmt.Join.On, stmt.Where)
+	default:
+		return nil, fmt.Errorf("Unsupported JOIN type: %s", stmt.Join.JoinType)
+	}
+
+	// 过滤行数据，只保留SELECT子句中指定的列
+	_, ok := stmt.Fields[0].(*ast.StarExpression)
+	if !(len(stmt.Fields) == 1 && ok) {
+		// 如果不是SELECT *，则需要过滤列
+		filteredRows := make([][]Cell, len(joinedRows))
+		for i, row := range joinedRows {
+			filteredRow := make([]Cell, len(results.Columns))
+			for j, col := range results.Columns {
+				if colIndex, exists := columnMap[col.Name]; exists && colIndex < len(row) {
+					filteredRow[j] = row[colIndex]
+				} else {
+					// 如果找不到列，设置为默认值
+					filteredRow[j] = Cell{Type: CellTypeText, TextValue: "NULL"}
+				}
+			}
+			filteredRows[i] = filteredRow
+		}
+		results.Rows = filteredRows
+	} else {
+		// 如果是SELECT *，直接使用所有列
+		results.Rows = joinedRows
+	}
+
+	// 处理 ORDER BY
+	if len(stmt.OrderBy) > 0 {
+		var err error
+		results.Rows, err = b.orderBy(results.Rows, results.Columns, stmt.OrderBy, append(leftTable.Columns, rightTable.Columns...))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return results, nil
+}
+
+// innerJoin 执行INNER JOIN
+func (b *MemoryBackend) innerJoin(leftRows, rightRows [][]Cell, leftTable, rightTable *Table, onCondition, whereCondition ast.Expression) [][]Cell {
+	resultRows := make([][]Cell, 0)
+
+	for _, leftRow := range leftRows {
+		for _, rightRow := range rightRows {
+			// 构建组合行用于条件评估
+			combinedRow := append(leftRow, rightRow...)
+			combinedColumns := append(leftTable.Columns, rightTable.Columns...)
+
+			// 判断是否满足ON条件
+			match, err := evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
+			if err != nil {
+				//如果不满足，则跳过
+				continue
+			}
+
+			if match {
+				// 如果有WHERE条件，也需满足
+				if whereCondition != nil {
+					whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+					if err != nil || !whereMatch {
+						continue
+					}
+				}
+				resultRows = append(resultRows, combinedRow)
+			}
+		}
+	}
+
+	return resultRows
+}
+
+// leftJoin 执行LEFT JOIN
+func (b *MemoryBackend) leftJoin(leftRows, rightRows [][]Cell, leftTable, rightTable *Table, onCondition, whereCondition ast.Expression) [][]Cell {
+	resultRows := make([][]Cell, 0)
+
+	for _, leftRow := range leftRows {
+		matched := false
+		for _, rightRow := range rightRows {
+			// 构建组合行用于条件评估
+			combinedRow := append(leftRow, rightRow...)
+			combinedColumns := append(leftTable.Columns, rightTable.Columns...)
+
+			// 评估ON条件
+			match, err := evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
+			if err != nil {
+				// 如果评估出错，跳过这一对行
+				continue
+			}
+
+			if match {
+				matched = true
+				// 如果有WHERE条件，也需满足
+				if whereCondition != nil {
+					whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+					if err != nil || !whereMatch {
+						continue
+					}
+				}
+				resultRows = append(resultRows, combinedRow)
+			}
+		}
+
+		// 如果没有匹配的右行，添加左行和NULL值的右行
+		if !matched {
+			nullRightRow := make([]Cell, len(rightTable.Columns))
+			for i := range nullRightRow {
+				nullRightRow[i] = Cell{Type: CellTypeText, TextValue: "NULL"}
+			}
+			combinedRow := append(leftRow, nullRightRow...)
+
+			// LEFT JOIN中，即使ON条件不匹配，也要考虑WHERE条件
+			if whereCondition != nil {
+				combinedColumns := append(leftTable.Columns, rightTable.Columns...)
+				whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+				if err != nil || !whereMatch {
+					continue
+				}
+			}
+
+			resultRows = append(resultRows, combinedRow)
+		}
+	}
+
+	return resultRows
+}
+
+// rightJoin 执行RIGHT JOIN
+func (b *MemoryBackend) rightJoin(leftRows, rightRows [][]Cell, leftTable, rightTable *Table, onCondition, whereCondition ast.Expression) [][]Cell {
+	resultRows := make([][]Cell, 0)
+
+	for _, rightRow := range rightRows {
+		matched := false
+		for _, leftRow := range leftRows {
+			// 构建组合行用于条件评估
+			combinedRow := append(leftRow, rightRow...)
+			combinedColumns := append(leftTable.Columns, rightTable.Columns...)
+
+			// 评估ON条件
+			match, err := evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
+			if err != nil {
+				// 如果评估出错，跳过这一对行
+				continue
+			}
+
+			if match {
+				matched = true
+				// 如果有WHERE条件，也需满足
+				if whereCondition != nil {
+					whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+					if err != nil || !whereMatch {
+						continue
+					}
+				}
+				resultRows = append(resultRows, combinedRow)
+			}
+		}
+
+		// 如果没有匹配的左行，添加NULL值的左行和右行
+		if !matched {
+			nullLeftRow := make([]Cell, len(leftTable.Columns))
+			for i := range nullLeftRow {
+				nullLeftRow[i] = Cell{Type: CellTypeText, TextValue: "NULL"}
+			}
+			combinedRow := append(nullLeftRow, rightRow...)
+
+			// RIGHT JOIN中，即使ON条件不匹配，也要考虑WHERE条件
+			if whereCondition != nil {
+				combinedColumns := append(leftTable.Columns, rightTable.Columns...)
+				whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+				if err != nil || !whereMatch {
+					continue
+				}
+			}
+
+			resultRows = append(resultRows, combinedRow)
+		}
+	}
+
+	return resultRows
 }
 
 // getVisibleRow 获取对当前事务可见的行版本
@@ -1840,9 +2188,18 @@ func isLess(left, right interface{}) (bool, error) {
 func getColumnValue(expr ast.Expression, row []Cell, columns []ast.ColumnDefinition) (interface{}, error) {
 	switch e := expr.(type) {
 	case *ast.Identifier:
+		// 处理表名.列名的形式
+		parts := strings.Split(e.Value, ".")
+		columnName := e.Value
+
+		// 如果有表名前缀，只使用列名部分进行查找
+		if len(parts) == 2 {
+			columnName = parts[1]
+		}
+
 		// 查找列索引
 		for i, col := range columns {
-			if col.Name == e.Value {
+			if col.Name == columnName {
 				switch row[i].Type {
 				case CellTypeInt:
 					return row[i].IntValue, nil

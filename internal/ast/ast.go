@@ -36,6 +36,17 @@ type Program struct {
 	Statements []Statement
 }
 
+// JoinClause 表示JOIN子句
+type JoinClause struct {
+	Token     lexer.Token
+	JoinType  string     // "INNER", "LEFT", "RIGHT"
+	TableName string     // 右表名
+	On        Expression // ON条件
+}
+
+func (jc *JoinClause) expressionNode()      {}
+func (jc *JoinClause) TokenLiteral() string { return jc.Token.Literal }
+
 // SelectStatement 表示SELECT语句
 // 表示 SELECT 查询语句
 // 包含选择的字段、表名和 WHERE 条件
@@ -43,6 +54,7 @@ type SelectStatement struct {
 	Token     lexer.Token
 	Fields    []Expression
 	TableName string
+	Join      *JoinClause // 添加JOIN子句，支持表关联查询
 	Where     Expression
 	GroupBy   []Expression    // 添加 GroupBy 字段，新增对group by 分组的支持
 	OrderBy   []OrderByClause // 添加 OrderBy 字段，新增对order by 排序的支持

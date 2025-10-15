@@ -38,6 +38,11 @@ const (
 	SHOW      TokenType = "SHOW"
 	USE       TokenType = "USE"
 	TABLES    TokenType = "TABLES"
+	INNER     TokenType = "INNER"
+	LEFT      TokenType = "LEFT"
+	RIGHT     TokenType = "RIGHT"
+	JOIN      TokenType = "JOIN"
+	ON        TokenType = "ON"
 
 	// 标识符和字面量
 	IDENT    TokenType = "IDENT" // 标识符（如列名、表名、函数名）
@@ -62,6 +67,7 @@ const (
 	RPAREN   TokenType = ")"
 	ASTERISK TokenType = "*"
 	COMMENT  TokenType = "--"
+	DOT      TokenType = "." // 点操作符，用于表名.列名
 )
 
 // Token 词法单元

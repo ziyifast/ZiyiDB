@@ -182,3 +182,41 @@ insert into users values (1, 'Tom', 20);
 create table products (id INT PRIMARY KEY,name text,price FLOAT);
 insert into products values (1, 'Apple', 10.5);
 show tables;
+
+
+---- 第八期 实现表间的连接操作 left join、right join、inner join
+create database test;
+use test;
+-- 创建测试表
+CREATE TABLE users (id INT PRIMARY KEY, name TEXT, age INT);
+CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, product TEXT, amount FLOAT);
+
+-- 插入测试数据
+INSERT INTO users VALUES (1, 'Alice', 25);
+INSERT INTO users VALUES (2, 'Bob', 30);
+INSERT INTO users VALUES (3, 'Charlie', 22);
+
+INSERT INTO orders VALUES (1, 1, 'Laptop', 1200.0);
+INSERT INTO orders VALUES (2, 1, 'Mouse', 25.0);
+INSERT INTO orders VALUES (3, 2, 'Keyboard', 75.0);
+INSERT INTO orders VALUES (4, 4, 'Monitor', 300.0);
+-- 测试INNER JOIN
+SELECT users.name, orders.product, orders.amount FROM users INNER JOIN orders ON users.id = orders.user_id;
+
+-- 测试LEFT JOIN
+SELECT users.name, orders.product, orders.amount FROM users LEFT JOIN orders ON users.id = orders.user_id;
+
+-- 测试RIGHT JOIN
+SELECT users.name, orders.product, orders.amount
+FROM users
+RIGHT JOIN orders ON users.id = orders.user_id;
+
+-- 带WHERE条件的JOIN
+SELECT users.name, orders.product, orders.amount
+FROM users
+INNER JOIN orders ON users.id = orders.user_id
+WHERE orders.amount > 50;
+
+-- 查询所有结果*
+SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id;
+
