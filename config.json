@@ -1,0 +1,9 @@
+{
+  "storage": {
+    "type": "disk",
+    "dataPath": "./data"
+  },
+  "server": {
+    "port": "3118"
+  }
+}
