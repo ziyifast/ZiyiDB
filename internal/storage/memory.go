@@ -30,6 +30,16 @@ type MemoryBackend struct {
 	base      *BaseEngine // 添加基类引用
 }
 
+func (b *MemoryBackend) CommitTransaction(txn *Transaction) error {
+	b.commitTransaction(txn)
+	return nil
+}
+
+func (b *MemoryBackend) RollbackTransaction(txn *Transaction) error {
+	b.rollbackTransaction(txn)
+	return nil
+}
+
 // Table 数据表，包含列定义、数据行和索引
 type Table struct {
 	Name     string

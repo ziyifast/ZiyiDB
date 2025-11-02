@@ -67,7 +67,7 @@ func executor(t string) {
 				fmt.Println("Error: No active transaction")
 				continue
 			}
-			if err := currentTxn.Commit(); err != nil {
+			if err := backend.CommitTransaction(currentTxn); err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {
 				fmt.Printf("Transaction %d committed\n", currentTxn.ID)
@@ -81,7 +81,7 @@ func executor(t string) {
 				fmt.Println("Error: No active transaction")
 				continue
 			}
-			if err := currentTxn.Rollback(); err != nil {
+			if err := backend.RollbackTransaction(currentTxn); err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {
 				fmt.Printf("Transaction %d rolled back\n", currentTxn.ID)

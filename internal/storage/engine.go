@@ -27,4 +27,10 @@ type Engine interface {
 
 	// 事务支持
 	BeginTransaction() *Transaction
+
+	// 提交事务
+	CommitTransaction(txn *Transaction) error
+
+	// 回滚事务
+	RollbackTransaction(txn *Transaction) error
 }
