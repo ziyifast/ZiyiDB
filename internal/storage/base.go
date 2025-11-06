@@ -28,7 +28,7 @@ func (b *BaseEngine) Insert(table *Table, stmt *ast.InsertStatement, txn *Transa
 	if len(stmt.Columns) > 0 {
 		// 用户指定了列名
 		if len(stmt.Columns) != len(stmt.Values) {
-			return fmt.Errorf("Column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(stmt.Columns))
+			return fmt.Errorf("column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(stmt.Columns))
 		}
 
 		// 构建列名到表列索引的映射
@@ -41,7 +41,7 @@ func (b *BaseEngine) Insert(table *Table, stmt *ast.InsertStatement, txn *Transa
 		for i, col := range stmt.Columns {
 			colIndex, exists := colIndexMap[col.Value]
 			if !exists {
-				return fmt.Errorf("Unknown column '%s' in INSERT statement", col.Value)
+				return fmt.Errorf("unknown column '%s' in INSERT statement", col.Value)
 			}
 
 			value, err := evaluateExpression(stmt.Values[i])
@@ -55,7 +55,7 @@ func (b *BaseEngine) Insert(table *Table, stmt *ast.InsertStatement, txn *Transa
 	} else {
 		// 用户未指定列名，使用所有列
 		if len(stmt.Values) != len(table.Columns) {
-			return fmt.Errorf("Column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(table.Columns))
+			return fmt.Errorf("column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(table.Columns))
 		}
 
 		// 填充所有列
@@ -89,17 +89,19 @@ func (b *BaseEngine) Insert(table *Table, stmt *ast.InsertStatement, txn *Transa
 	for i, col := range table.Columns {
 		if col.Primary {
 			key := row[i].String()
-			// 直接使用索引检查冲突
-			if rowIndexes, exists := table.Indexes[col.Name].Values[key]; exists {
-				// 检查这些索引指向的行是否与当前插入的行冲突
-				for _, rowIndex := range rowIndexes {
-					if rowIndex < len(table.Rows) {
-						versionedRow := table.Rows[rowIndex]
-						// 在事务上下文中检查是否存在可见的冲突行
-						visibleRow := getVisibleRow(versionedRow, txn)
-						if visibleRow != nil && visibleRow[i].String() == key {
-							// 存在具有相同主键的可见行，违反主键约束
-							return fmt.Errorf("Duplicate entry '%s' for key '%s'", key, col.Name)
+			// 只检查主键索引中是否已存在相同的值
+			if index, exists := table.Indexes[col.Name]; exists {
+				if _, keyExists := index.Values[key]; keyExists && len(index.Values[key]) > 0 {
+					// 检查这些行中是否有可见的冲突行
+					for _, rowIndex := range index.Values[key] {
+						if rowIndex < len(table.Rows) {
+							versionedRow := table.Rows[rowIndex]
+							// 在事务上下文中检查是否存在可见的冲突行
+							visibleRow := getVisibleRow(versionedRow, txn)
+							if visibleRow != nil && visibleRow[i].String() == key {
+								// 存在具有相同主键的可见行，违反主键约束
+								return fmt.Errorf("duplicate entry '%s' for key '%s'", key, col.Name)
+							}
 						}
 					}
 				}
@@ -127,10 +129,17 @@ func (b *BaseEngine) Insert(table *Table, stmt *ast.InsertStatement, txn *Transa
 	rowIndex := len(table.Rows)
 	table.Rows = append(table.Rows, versionedCells)
 
-	// 更新索引
+	// 更新索引（只为主键列更新索引）
 	for i, col := range table.Columns {
 		if col.Primary {
 			key := row[i].String()
+			// 确保主键索引存在
+			if table.Indexes[col.Name] == nil {
+				table.Indexes[col.Name] = &Index{
+					Column: col.Name,
+					Values: make(map[string][]int),
+				}
+			}
 			table.Indexes[col.Name].Values[key] = append(table.Indexes[col.Name].Values[key], rowIndex)
 		}
 	}

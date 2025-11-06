@@ -107,9 +107,6 @@ func (t *Transaction) Rollback() error {
 
 	t.Status = TxnAborted
 
-	// 在实际的存储引擎中回滚更改
-	t.Backend.RollbackTransaction(t)
-
 	return nil
 }
 

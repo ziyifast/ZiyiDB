@@ -127,7 +127,6 @@ func (d *DiskBackend) loadTable(dbName, tableName string, txn *Transaction) (*Ta
 		}
 		d.cacheMutex.RUnlock()
 	}
-
 	d.dictMutex.RLock()
 	// 从数据字典获取表结构
 	dbTables, dbExists := d.dataDictionary[dbName]
@@ -135,7 +134,6 @@ func (d *DiskBackend) loadTable(dbName, tableName string, txn *Transaction) (*Ta
 		d.dictMutex.RUnlock()
 		return nil, fmt.Errorf("database '%s' not exist", dbName)
 	}
-
 	metadata, tableExists := dbTables[tableName]
 	if !tableExists {
 		d.dictMutex.RUnlock()
@@ -151,7 +149,6 @@ func (d *DiskBackend) loadTable(dbName, tableName string, txn *Transaction) (*Ta
 		RowLocks: make(map[int]*sync.RWMutex),
 		Rows:     make([][]VersionedCell, 0),
 	}
-
 	// 恢复索引结构
 	for name, idxMeta := range metadata.Indexes {
 		table.Indexes[name] = &Index{
@@ -264,13 +261,11 @@ func (d *DiskBackend) rebuildIndexes(table *Table) {
 
 	// 重建索引数据
 	for i, row := range table.Rows {
-		for _, col := range table.Columns {
-			if col.Primary {
-				if i < len(row) {
-					key := row[i].Data.String()
-					if index, exists := table.Indexes[col.Name]; exists {
-						index.Values[key] = append(index.Values[key], i)
-					}
+		for j, col := range table.Columns {
+			if col.Primary && j < len(row) {
+				key := row[j].Data.String()
+				if index, exists := table.Indexes[col.Name]; exists {
+					index.Values[key] = append(index.Values[key], i)
 				}
 			}
 		}
@@ -286,7 +281,7 @@ func (d *DiskBackend) CreateDatabase(stmt *ast.CreateDatabaseStatement) error {
 
 	// 检查数据库是否已存在
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
-		return fmt.Errorf("数据库 '%s' 已存在", stmt.Name)
+		return fmt.Errorf("database '%s' already exist", stmt.Name)
 	}
 
 	// 创建数据库目录
@@ -397,6 +392,7 @@ func (d *DiskBackend) ShowTables(connCtx context.DBContext) *Results {
 	return results
 }
 
+// CreateTable 创建表
 func (d *DiskBackend) CreateTable(databaseName string, stmt *ast.CreateTableStatement) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -416,7 +412,7 @@ func (d *DiskBackend) CreateTable(databaseName string, stmt *ast.CreateTableStat
 	d.dictMutex.RUnlock()
 
 	if tableExists {
-		return fmt.Errorf("表 '%s' 已存在", stmt.TableName)
+		return fmt.Errorf("table '%s' already exist", stmt.TableName)
 	}
 
 	// 创建新表
@@ -610,6 +606,7 @@ func (d *DiskBackend) updateIndexesAfterInsert(table *Table, oldRowCount int) {
 	}
 }
 
+// BeginTransaction 开启事务
 func (d *DiskBackend) BeginTransaction() *Transaction {
 	return d.txnMgr.BeginTransaction(d)
 }
@@ -660,6 +657,9 @@ func (d *DiskBackend) CommitTransaction(txn *Transaction) error {
 				}
 			}
 
+			// 重建索引以确保一致性
+			d.rebuildIndexes(table)
+
 			// 保存表到磁盘
 			if err := d.saveTable(dbName, tableName, table); err != nil {
 				return err
@@ -676,12 +676,9 @@ func (d *DiskBackend) CommitTransaction(txn *Transaction) error {
 	return d.saveDataDictionary()
 }
 
-// RollbackTransaction 回滚事务中的更改
+// RollbackTransaction 回滚事务
 func (d *DiskBackend) RollbackTransaction(txn *Transaction) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	// 首先调用事务管理器的回滚方法
+	// 先执行事务管理器的回滚逻辑（更新事务状态等）
 	if err := d.txnMgr.RollbackTransaction(txn); err != nil {
 		return err
 	}
@@ -691,7 +688,7 @@ func (d *DiskBackend) RollbackTransaction(txn *Transaction) error {
 	delete(d.txnTableCache, txn.ID)
 	d.cacheMutex.Unlock()
 
-	// 保存数据字典
+	// 保存数据字典（确保元数据一致性）
 	return d.saveDataDictionary()
 }
 

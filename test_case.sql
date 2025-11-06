@@ -231,16 +231,3 @@ select * from users;
 use test;
 select * from users;
 
-
--- 演示事务
-use test;
-select * from users;
-begin;
-insert into users values (2, 'Jerry', 18);
-select * from users;
-commit;
-
-select * from users;
-delete from users where id = 2;
---唯一索引不生效？？
-

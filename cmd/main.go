@@ -16,9 +16,8 @@ import (
 	"ziyi.db.com/network"
 )
 
-// 将原来的变量声明修改为：
 var history []string                // 存储命令历史
-var backend storage.Engine          // 存储引擎实例（修改类型为接口类型）
+var backend storage.Engine          // 存储引擎实例
 var currentTxn *storage.Transaction // 当前事务
 var historyIndex int                // 当前历史记录索引
 var currentDatabase string          // 当前用户选择的数据库
@@ -87,6 +86,7 @@ func executor(t string) {
 				fmt.Printf("Transaction %d rolled back\n", currentTxn.ID)
 			}
 			currentTxn = nil
+			continue
 		}
 
 		// 创建词法分析器
@@ -260,18 +260,18 @@ func main() {
 	// 加载配置
 	config, err := config.LoadConfig(*configPath)
 	if err != nil {
-		fmt.Printf("无法加载配置文件: %v\n", err)
+		fmt.Printf("can't load config file: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 初始化存储引擎（修改这部分）
+	// 初始化存储引擎
 	switch config.Storage.Type {
 	case "memory":
 		backend = storage.NewMemoryBackend()
 	case "disk":
 		backend = storage.NewDiskBackend(config.Storage.DataPath)
 	default:
-		fmt.Printf("未知的存储引擎类型: %s\n", config.Storage.Type)
+		fmt.Printf("unknown storage engine type: %s\n", config.Storage.Type)
 		os.Exit(1)
 	}
 
@@ -285,16 +285,9 @@ func main() {
 		} else if config.Server.Port != "" {
 			*port = config.Server.Port
 		}
-
-		// 类型断言获取 MemoryBackend（如果使用的是内存引擎）
-		if memoryBackend, ok := backend.(*storage.MemoryBackend); ok {
-			server := network.NewServer(memoryBackend, *port)
-			fmt.Printf("Starting ZiyiDB server on port %s with %s storage...\n", *port, config.Storage.Type)
-			log.Fatal(server.Start())
-		} else {
-			fmt.Println("Server mode only supports memory storage engine")
-			os.Exit(1)
-		}
+		server := network.NewServer(&backend, *port)
+		fmt.Printf("Starting ZiyiDB server on port %s with %s storage...\n", *port, config.Storage.Type)
+		log.Fatal(server.Start())
 	}
 
 	fmt.Println("Welcome to ZiyiDB!")

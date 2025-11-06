@@ -1,0 +1,9 @@
+services:
+  ziyidb:
+    build: .
+    container_name: ziyidb
+    ports:
+      - "3118:3118"
+    restart: unless-stopped
+    environment:
+      - ZIYIDB_PORT=3118
