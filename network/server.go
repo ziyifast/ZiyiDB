@@ -16,7 +16,7 @@ import (
 const DefaultPort = "3118"
 
 type Server struct {
-	backend     *storage.MemoryBackend
+	backend     storage.Engine
 	port        string
 	connections map[net.Conn]*ServerConnection
 	connMutex   sync.RWMutex
@@ -35,9 +35,9 @@ func (s *ServerConnection) GetDBName() string {
 func (s *ServerConnection) SetDBName(dbName string) {
 	s.db = dbName
 }
-func NewServer(backend *storage.MemoryBackend, port string) *Server {
+func NewServer(backend *storage.Engine, port string) *Server {
 	return &Server{
-		backend:     backend,
+		backend:     *backend,
 		port:        port,
 		connections: make(map[net.Conn]*ServerConnection),
 	}

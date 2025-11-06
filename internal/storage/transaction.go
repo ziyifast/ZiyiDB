@@ -25,7 +25,7 @@ type Transaction struct {
 	CommitTime time.Time
 	ReadSet    map[string]map[int]struct{} // 记录读取的表和行
 	WriteSet   map[string]map[int]struct{} // 记录写入的表和行
-	Backend    *MemoryBackend
+	Backend    Engine
 	mu         sync.RWMutex
 }
 
@@ -53,7 +53,7 @@ func NewTransactionManager() *TransactionManager {
 }
 
 // BeginTransaction 开始一个新事务
-func (tm *TransactionManager) BeginTransaction(backend *MemoryBackend) *Transaction {
+func (tm *TransactionManager) BeginTransaction(backend Engine) *Transaction {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -72,6 +72,14 @@ func (tm *TransactionManager) BeginTransaction(backend *MemoryBackend) *Transact
 	return txn
 }
 
+func (tm *TransactionManager) CommitTransaction(txn *Transaction) error {
+	return txn.Commit()
+}
+
+func (tm *TransactionManager) RollbackTransaction(txn *Transaction) error {
+	return txn.Rollback()
+}
+
 // Commit 提交事务
 func (t *Transaction) Commit() error {
 	t.mu.Lock()
@@ -84,9 +92,6 @@ func (t *Transaction) Commit() error {
 	// 设置提交时间
 	t.CommitTime = time.Now()
 	t.Status = TxnCommitted
-
-	// 在实际的存储引擎中提交更改
-	t.Backend.commitTransaction(t)
 
 	return nil
 }
@@ -101,9 +106,6 @@ func (t *Transaction) Rollback() error {
 	}
 
 	t.Status = TxnAborted
-
-	// 在实际的存储引擎中回滚更改
-	t.Backend.rollbackTransaction(t)
 
 	return nil
 }

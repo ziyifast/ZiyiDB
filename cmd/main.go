@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"ziyi.db.com/config"
 	"ziyi.db.com/internal/ast"
 	"ziyi.db.com/internal/lexer"
 	"ziyi.db.com/internal/parser"
@@ -16,7 +17,7 @@ import (
 )
 
 var history []string                // 存储命令历史
-var backend *storage.MemoryBackend  // 存储引擎实例
+var backend storage.Engine          // 存储引擎实例
 var currentTxn *storage.Transaction // 当前事务
 var historyIndex int                // 当前历史记录索引
 var currentDatabase string          // 当前用户选择的数据库
@@ -65,7 +66,7 @@ func executor(t string) {
 				fmt.Println("Error: No active transaction")
 				continue
 			}
-			if err := currentTxn.Commit(); err != nil {
+			if err := backend.CommitTransaction(currentTxn); err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {
 				fmt.Printf("Transaction %d committed\n", currentTxn.ID)
@@ -79,12 +80,13 @@ func executor(t string) {
 				fmt.Println("Error: No active transaction")
 				continue
 			}
-			if err := currentTxn.Rollback(); err != nil {
+			if err := backend.RollbackTransaction(currentTxn); err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {
 				fmt.Printf("Transaction %d rolled back\n", currentTxn.ID)
 			}
 			currentTxn = nil
+			continue
 		}
 
 		// 创建词法分析器
@@ -250,25 +252,41 @@ func completer(d prompt.Document) []prompt.Suggest {
 }
 
 func main() {
-	// 添加命令行参数
+	// 添加配置文件参数
+	configPath := flag.String("config", "config.json", "Path to config file")
 	port := flag.String("port", "3118", "Port to listen on")
 	flag.Parse()
 
+	// 加载配置
+	config, err := config.LoadConfig(*configPath)
+	if err != nil {
+		fmt.Printf("can't load config file: %v\n", err)
+		os.Exit(1)
+	}
+
 	// 初始化存储引擎
-	backend = storage.NewMemoryBackend()
+	switch config.Storage.Type {
+	case "memory":
+		backend = storage.NewMemoryBackend()
+	case "disk":
+		backend = storage.NewDiskBackend(config.Storage.DataPath)
+	default:
+		fmt.Printf("unknown storage engine type: %s\n", config.Storage.Type)
+		os.Exit(1)
+	}
 
 	// 检查是否以服务器模式运行
 	args := flag.Args()
 	if len(args) > 0 && args[0] == "server" {
 		// 启动服务器模式
-		// 允许通过环境变量覆盖端口
 		portEnv := os.Getenv("ZIYIDB_PORT")
 		if portEnv != "" {
 			*port = portEnv
+		} else if config.Server.Port != "" {
+			*port = config.Server.Port
 		}
-
-		server := network.NewServer(backend, *port)
-		fmt.Printf("Starting ZiyiDB server on port %s...\n", *port)
+		server := network.NewServer(&backend, *port)
+		fmt.Printf("Starting ZiyiDB server on port %s with %s storage...\n", *port, config.Storage.Type)
 		log.Fatal(server.Start())
 	}
 

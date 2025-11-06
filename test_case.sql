@@ -220,3 +220,14 @@ WHERE orders.amount > 50;
 -- 查询所有结果*
 SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id;
 
+---- 第九期 实现持久化的存储引擎
+-- 创建数据库test
+create database test;
+use test;
+create table users (id INT PRIMARY KEY,name text,age INT);
+insert into users values (1, 'Tom', 20);
+select * from users;
+-- 重启数据库，然后观察数据库及表中数据是否存在
+use test;
+select * from users;
+

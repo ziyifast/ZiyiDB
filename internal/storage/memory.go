@@ -6,13 +6,14 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"ziyi.db.com/internal/ast"
 	"ziyi.db.com/internal/context"
 )
+
+var _ Engine = (*MemoryBackend)(nil)
 
 // Database 表示数据库
 type Database struct {
@@ -26,6 +27,17 @@ type MemoryBackend struct {
 	Databases map[string]*Database
 	txnMgr    *TransactionManager
 	Mu        sync.RWMutex
+	base      *BaseEngine // 添加基类引用
+}
+
+func (b *MemoryBackend) CommitTransaction(txn *Transaction) error {
+	b.commitTransaction(txn)
+	return nil
+}
+
+func (b *MemoryBackend) RollbackTransaction(txn *Transaction) error {
+	b.rollbackTransaction(txn)
+	return nil
 }
 
 // Table 数据表，包含列定义、数据行和索引
@@ -61,6 +73,7 @@ func NewMemoryBackend() *MemoryBackend {
 	return &MemoryBackend{
 		Databases: make(map[string]*Database),
 		txnMgr:    NewTransactionManager(),
+		base:      &BaseEngine{},
 	}
 }
 
@@ -226,183 +239,8 @@ func (b *MemoryBackend) Insert(databaseName string, stmt *ast.InsertStatement, t
 	table.mu.Lock()
 	defer table.mu.Unlock()
 
-	// 初始化行数据（长度为表的总列数）
-	row := make([]Cell, len(table.Columns))
-
-	// 处理插入列列表（用户显式指定的列或隐式全列）
-	if len(stmt.Columns) > 0 {
-		// 用户指定了列名
-		if len(stmt.Columns) != len(stmt.Values) {
-			return fmt.Errorf("Column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(stmt.Columns))
-		}
-
-		// 构建列名到表列索引的映射
-		colIndexMap := make(map[string]int)
-		for idx, col := range table.Columns {
-			colIndexMap[col.Name] = idx
-		}
-
-		// 填充指定的列
-		for i, col := range stmt.Columns {
-			colIndex, exists := colIndexMap[col.Value]
-			if !exists {
-				return fmt.Errorf("Unknown column '%s' in INSERT statement", col.Value)
-			}
-
-			value, err := evaluateExpression(stmt.Values[i])
-			if err != nil {
-				return fmt.Errorf("invalid value for column '%s': %v", col.Value, err)
-			}
-
-			// 类型转换
-			switch v := value.(type) {
-			case string:
-				if table.Columns[colIndex].Type == "INT" {
-					intVal, err := strconv.ParseInt(v, 10, 32)
-					if err != nil {
-						return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, col.Value)
-					}
-					row[colIndex] = Cell{Type: CellTypeInt, IntValue: int32(intVal)}
-				} else {
-					row[colIndex] = Cell{Type: CellTypeText, TextValue: v}
-				}
-			case int32:
-				row[colIndex] = Cell{Type: CellTypeInt, IntValue: v}
-			case float32:
-				row[colIndex] = Cell{Type: CellTypeFloat, FloatValue: v}
-			case time.Time:
-				row[colIndex] = Cell{Type: CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
-			default:
-				return fmt.Errorf("Unsupported value type: %T for column '%s'", value, col.Value)
-			}
-		}
-	} else {
-		// 用户未指定列名，使用所有列
-		if len(stmt.Values) != len(table.Columns) {
-			return fmt.Errorf("Column count doesn't match value count at row 1 (got %d, want %d)", len(stmt.Values), len(table.Columns))
-		}
-
-		// 填充所有列
-		for i, expr := range stmt.Values {
-			value, err := evaluateExpression(expr)
-			if err != nil {
-				return fmt.Errorf("invalid value for column '%s': %v", table.Columns[i].Name, err)
-			}
-
-			// 类型转换
-			switch v := value.(type) {
-			case string:
-				if table.Columns[i].Type == "INT" {
-					intVal, err := strconv.ParseInt(v, 10, 32)
-					if err != nil {
-						return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, table.Columns[i].Name)
-					}
-					row[i] = Cell{Type: CellTypeInt, IntValue: int32(intVal)}
-				} else {
-					row[i] = Cell{Type: CellTypeText, TextValue: v}
-				}
-			case int32:
-				row[i] = Cell{Type: CellTypeInt, IntValue: v}
-			case float32:
-				row[i] = Cell{Type: CellTypeFloat, FloatValue: v}
-			case time.Time:
-				row[i] = Cell{Type: CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
-			default:
-				return fmt.Errorf("Unsupported value type: %T for column '%s'", value, table.Columns[i].Name)
-			}
-		}
-	}
-
-	// 处理默认值（对于未指定的列）
-	for i, col := range table.Columns {
-		// 如果该列没有被赋值且有默认值
-		if row[i].Type == 0 && col.Default != nil {
-			defaultExpr := col.Default.(*ast.DefaultExpression)
-			value, err := evaluateExpression(defaultExpr.Value)
-			if err != nil {
-				return fmt.Errorf("invalid default value for column '%s': %v", col.Name, err)
-			}
-
-			// 类型转换
-			switch v := value.(type) {
-			case string:
-				if col.Type == "INT" {
-					intVal, err := strconv.ParseInt(v, 10, 32)
-					if err != nil {
-						return fmt.Errorf("Incorrect integer value: '%s' for column '%s'", v, col.Name)
-					}
-					row[i] = Cell{Type: CellTypeInt, IntValue: int32(intVal)}
-				} else {
-					row[i] = Cell{Type: CellTypeText, TextValue: v}
-				}
-			case int32:
-				row[i] = Cell{Type: CellTypeInt, IntValue: v}
-			case float32:
-				row[i] = Cell{Type: CellTypeFloat, FloatValue: v}
-			case time.Time:
-				row[i] = Cell{Type: CellTypeDateTime, TimeValue: v.Format("2006-01-02 15:04:05")}
-			default:
-				return fmt.Errorf("Unsupported default value type: %T for column '%s'", value, col.Name)
-			}
-		}
-	}
-
-	// 检查主键约束
-	for i, col := range table.Columns {
-		if col.Primary {
-			key := row[i].String()
-			// 直接使用索引检查冲突
-			if rowIndexes, exists := table.Indexes[col.Name].Values[key]; exists {
-				// 检查这些索引指向的行是否与当前插入的行冲突
-				for _, rowIndex := range rowIndexes {
-					if rowIndex < len(table.Rows) {
-						versionedRow := table.Rows[rowIndex]
-						// 在事务上下文中检查是否存在可见的冲突行
-						visibleRow := b.getVisibleRow(versionedRow, txn)
-						if visibleRow != nil && visibleRow[i].String() == key {
-							// 存在具有相同主键的可见行，违反主键约束
-							return fmt.Errorf("Duplicate entry '%s' for key '%s'", key, col.Name)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 创建版本化单元格
-	versionedCells := make([]VersionedCell, len(table.Columns))
-	txnID := uint64(0)
-	if txn != nil {
-		txnID = txn.ID
-	}
-
-	for i, cell := range row {
-		versionedCells[i] = VersionedCell{
-			Data:      cell,
-			TxnID:     txnID,
-			Timestamp: time.Now(),
-			Committed: txn == nil, // 如果没有事务，则立即提交（自动提交模式）
-		}
-	}
-
-	// 插入数据
-	rowIndex := len(table.Rows)
-	table.Rows = append(table.Rows, versionedCells)
-
-	// 更新索引
-	for i, col := range table.Columns {
-		if col.Primary {
-			key := row[i].String()
-			table.Indexes[col.Name].Values[key] = append(table.Indexes[col.Name].Values[key], rowIndex)
-		}
-	}
-
-	// 记录写入的行
-	if txn != nil {
-		txn.AddToWriteSet(stmt.TableName, rowIndex)
-	}
-
-	return nil
+	// 使用通用逻辑处理插入
+	return b.base.Insert(table, stmt, txn, b.getVisibleRow, b.base.convertToCell, b.base.evaluateExpression)
 }
 
 // commitTransaction 提交事务中的更改
@@ -511,215 +349,14 @@ func (b *MemoryBackend) Select(databaseName string, stmt *ast.SelectStatement, t
 	if !tableExists {
 		return nil, fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
 	}
+
 	// 判断是否有表连接操作
 	if stmt.Join != nil {
 		return b.selectWithJoin(databaseName, stmt, txn)
 	}
 
-	results := &Results{
-		Columns: make([]ResultColumn, 0),
-		Rows:    make([][]Cell, 0),
-	}
-
-	// 如果有 GROUP BY 子句
-	if len(stmt.GroupBy) > 0 {
-		res, err := b.selectWithGroupBy(databaseName, stmt, table, txn)
-		if err != nil {
-			return nil, err
-		}
-
-		// 处理 ORDER BY（在 GROUP BY 之后）
-		if len(stmt.OrderBy) > 0 {
-			res.Rows, err = b.orderBy(res.Rows, res.Columns, stmt.OrderBy, table.Columns)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		return res, nil
-	}
-
-	// 检查是否为聚合函数查询
-	isAggregation := false
-	var aggregateFunc *ast.FunctionCall
-
-	// 处理select列表
-	if len(stmt.Fields) == 1 {
-		// 检查是否为 SELECT *
-		if _, ok := stmt.Fields[0].(*ast.StarExpression); ok {
-			// SELECT *
-			for _, col := range table.Columns {
-				results.Columns = append(results.Columns, ResultColumn{
-					Name: col.Name,
-					Type: col.Type,
-				})
-			}
-		} else if fn, ok := stmt.Fields[0].(*ast.FunctionCall); ok {
-			// 处理函数调用
-			isAggregation = true
-			aggregateFunc = fn
-			results.Columns = append(results.Columns, ResultColumn{
-				Name: fn.Name,
-				Type: "FUNCTION",
-			})
-		} else {
-			// 处理单个标识符
-			if identifier, ok := stmt.Fields[0].(*ast.Identifier); ok {
-				found := false
-				for _, col := range table.Columns {
-					if col.Name == identifier.Value {
-						results.Columns = append(results.Columns, ResultColumn{
-							Name: col.Name,
-							Type: col.Type,
-						})
-						found = true
-						break
-					}
-				}
-				if !found {
-					return nil, fmt.Errorf("Unknown column '%s' in 'field list'", identifier.Value)
-				}
-			} else {
-				return nil, fmt.Errorf("Unsupported select expression type")
-			}
-		}
-	} else {
-		// 处理多个列
-		for _, expr := range stmt.Fields {
-			switch e := expr.(type) {
-			case *ast.Identifier:
-				// 查找列
-				found := false
-				for _, col := range table.Columns {
-					if col.Name == e.Value {
-						results.Columns = append(results.Columns, ResultColumn{
-							Name: col.Name,
-							Type: col.Type,
-						})
-						found = true
-						break
-					}
-				}
-				if !found {
-					return nil, fmt.Errorf("Unknown column '%s' in 'field list'", e.Value)
-				}
-			case *ast.FunctionCall:
-				// 处理函数调用（多列中的函数）
-				results.Columns = append(results.Columns, ResultColumn{
-					Name: e.Name,
-					Type: "FUNCTION",
-				})
-			default:
-				if _, ok := e.(*ast.StarExpression); ok {
-					// SELECT *
-					for _, col := range table.Columns {
-						results.Columns = append(results.Columns, ResultColumn{
-							Name: col.Name,
-							Type: col.Type,
-						})
-					}
-				} else {
-					return nil, fmt.Errorf("Unsupported select expression type")
-				}
-			}
-		}
-	}
-
-	// 如果是聚合函数查询，直接计算结果
-	if isAggregation {
-		// 处理WHERE子句
-		filteredRows := make([][]Cell, 0)
-		for i, row := range table.Rows {
-			// 在事务上下文中读取最新可见版本
-			visibleRow := b.getVisibleRow(row, txn)
-			if visibleRow == nil {
-				continue
-			}
-
-			if stmt.Where != nil {
-				match, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
-				if err != nil {
-					return nil, err
-				}
-				if !match {
-					continue
-				}
-			}
-			filteredRows = append(filteredRows, visibleRow)
-
-			// 记录读取的行
-			if txn != nil {
-				txn.AddToReadSet(stmt.TableName, i)
-			}
-		}
-
-		functionResult := calculateFunctionResults(aggregateFunc, table, filteredRows)
-		results.Rows = [][]Cell{functionResult}
-
-		// 聚合函数结果通常只有一行，不需要排序
-		return results, nil
-	}
-
-	// 处理WHERE子句
-	filteredRows := make([][]Cell, 0)
-	for i, row := range table.Rows {
-		// 在事务上下文中读取最新可见版本
-		visibleRow := b.getVisibleRow(row, txn)
-		if visibleRow == nil {
-			continue
-		}
-
-		if stmt.Where != nil {
-			match, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
-			if err != nil {
-				return nil, err
-			}
-			if !match {
-				continue
-			}
-		}
-		filteredRows = append(filteredRows, visibleRow)
-
-		// 记录读取的行
-		if txn != nil {
-			txn.AddToReadSet(stmt.TableName, i)
-		}
-	}
-
-	// 构建结果行
-	for _, row := range filteredRows {
-		resultRow := make([]Cell, len(results.Columns))
-		for j, col := range results.Columns {
-			// 查找列在原始行中的位置
-			found := false
-			for k, tableCol := range table.Columns {
-				if tableCol.Name == col.Name {
-					// 确保索引在有效范围内
-					if k < len(row) {
-						resultRow[j] = row[k]
-						found = true
-						break
-					}
-				}
-			}
-			// 如果没找到对应的列，设置为默认值
-			if !found {
-				resultRow[j] = Cell{Type: CellTypeText, TextValue: "NULL"}
-			}
-		}
-		results.Rows = append(results.Rows, resultRow)
-	}
-
-	// 处理 ORDER BY
-	if len(stmt.OrderBy) > 0 {
-		var err error
-		results.Rows, err = b.orderBy(results.Rows, results.Columns, stmt.OrderBy, table.Columns)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return results, nil
+	// 使用通用逻辑处理查询
+	return b.base.Select(table, stmt, txn, b.getVisibleRow, b.evaluateWhereCondition)
 }
 
 // selectWithJoin 处理JOIN查询
@@ -934,7 +571,7 @@ func (b *MemoryBackend) innerJoin(leftRows, rightRows [][]Cell, leftTable, right
 			combinedColumns := append(leftTable.Columns, rightTable.Columns...)
 
 			// 判断是否满足ON条件
-			match, err := evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
+			match, err := b.base.evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
 			if err != nil {
 				//如果不满足，则跳过
 				continue
@@ -943,7 +580,7 @@ func (b *MemoryBackend) innerJoin(leftRows, rightRows [][]Cell, leftTable, right
 			if match {
 				// 如果有WHERE条件，也需满足
 				if whereCondition != nil {
-					whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+					whereMatch, err := b.base.evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
 					if err != nil || !whereMatch {
 						continue
 					}
@@ -968,7 +605,7 @@ func (b *MemoryBackend) leftJoin(leftRows, rightRows [][]Cell, leftTable, rightT
 			combinedColumns := append(leftTable.Columns, rightTable.Columns...)
 
 			// 评估ON条件
-			match, err := evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
+			match, err := b.base.evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
 			if err != nil {
 				// 如果评估出错，跳过这一对行
 				continue
@@ -978,7 +615,7 @@ func (b *MemoryBackend) leftJoin(leftRows, rightRows [][]Cell, leftTable, rightT
 				matched = true
 				// 如果有WHERE条件，也需满足
 				if whereCondition != nil {
-					whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+					whereMatch, err := b.base.evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
 					if err != nil || !whereMatch {
 						continue
 					}
@@ -998,7 +635,7 @@ func (b *MemoryBackend) leftJoin(leftRows, rightRows [][]Cell, leftTable, rightT
 			// LEFT JOIN中，即使ON条件不匹配，也要考虑WHERE条件
 			if whereCondition != nil {
 				combinedColumns := append(leftTable.Columns, rightTable.Columns...)
-				whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+				whereMatch, err := b.base.evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
 				if err != nil || !whereMatch {
 					continue
 				}
@@ -1023,7 +660,7 @@ func (b *MemoryBackend) rightJoin(leftRows, rightRows [][]Cell, leftTable, right
 			combinedColumns := append(leftTable.Columns, rightTable.Columns...)
 
 			// 评估ON条件
-			match, err := evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
+			match, err := b.base.evaluateWhereCondition(onCondition, combinedRow, combinedColumns)
 			if err != nil {
 				// 如果评估出错，跳过这一对行
 				continue
@@ -1033,7 +670,7 @@ func (b *MemoryBackend) rightJoin(leftRows, rightRows [][]Cell, leftTable, right
 				matched = true
 				// 如果有WHERE条件，也需满足
 				if whereCondition != nil {
-					whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+					whereMatch, err := b.base.evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
 					if err != nil || !whereMatch {
 						continue
 					}
@@ -1053,7 +690,7 @@ func (b *MemoryBackend) rightJoin(leftRows, rightRows [][]Cell, leftTable, right
 			// RIGHT JOIN中，即使ON条件不匹配，也要考虑WHERE条件
 			if whereCondition != nil {
 				combinedColumns := append(leftTable.Columns, rightTable.Columns...)
-				whereMatch, err := evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
+				whereMatch, err := b.base.evaluateWhereCondition(whereCondition, combinedRow, combinedColumns)
 				if err != nil || !whereMatch {
 					continue
 				}
@@ -1267,7 +904,7 @@ func (b *MemoryBackend) selectWithGroupBy(databaseName string, stmt *ast.SelectS
 		}
 
 		if stmt.Where != nil {
-			match, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
+			match, err := b.base.evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
 			if err != nil {
 				return nil, err
 			}
@@ -1667,92 +1304,8 @@ func (b *MemoryBackend) Update(databaseName string, stmt *ast.UpdateStatement, t
 		return fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
 	}
 
-	// 获取列索引
-	columnIndices := make(map[string]int)
-	for i, col := range table.Columns {
-		columnIndices[col.Name] = i
-	}
-
-	// 验证所有要更新的列是否存在
-	for _, set := range stmt.Set {
-		if _, ok := columnIndices[set.Column]; !ok {
-			return fmt.Errorf("Unknown column '%s' in 'field list'", set.Column)
-		}
-	}
-
-	// 更新符合条件的行
-	for i := range table.Rows {
-		// 获取可见行数据
-		visibleRow := b.getVisibleRow(table.Rows[i], txn)
-		if visibleRow == nil {
-			continue
-		}
-
-		if stmt.Where != nil {
-			// 评估WHERE条件
-			result, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
-			if err != nil {
-				return err
-			}
-			if !result {
-				continue
-			}
-		}
-
-		// 更新行
-		for _, set := range stmt.Set {
-			colIndex := columnIndices[set.Column]
-			value, err := evaluateExpression(set.Value)
-			if err != nil {
-				return err
-			}
-
-			txnID := uint64(0)
-			if txn != nil {
-				txnID = txn.ID
-			}
-
-			switch v := value.(type) {
-			case int32:
-				table.Rows[i][colIndex] = VersionedCell{
-					Data:      Cell{Type: CellTypeInt, IntValue: v},
-					TxnID:     txnID,
-					Timestamp: time.Now(),
-					Committed: txn == nil, // 如果没有事务，则立即提交
-				}
-			case string:
-				table.Rows[i][colIndex] = VersionedCell{
-					Data:      Cell{Type: CellTypeText, TextValue: v},
-					TxnID:     txnID,
-					Timestamp: time.Now(),
-					Committed: txn == nil, // 如果没有事务，则立即提交
-				}
-			case float32:
-				table.Rows[i][colIndex] = VersionedCell{
-					Data:      Cell{Type: CellTypeFloat, FloatValue: v},
-					TxnID:     txnID,
-					Timestamp: time.Now(),
-					Committed: txn == nil, // 如果没有事务，则立即提交
-				}
-			case time.Time:
-				table.Rows[i][colIndex] = VersionedCell{
-					Data:      Cell{Type: CellTypeDateTime, TimeValue: v.String()},
-					TxnID:     txnID,
-					Timestamp: time.Now(),
-					Committed: txn == nil, // 如果没有事务，则立即提交
-				}
-			default:
-				return fmt.Errorf("Unsupported value type: %T for column '%s'", value, set.Column)
-			}
-		}
-
-		// 记录写入的行
-		if txn != nil {
-			txn.AddToWriteSet(stmt.TableName, i)
-		}
-	}
-
-	return nil
+	// 使用通用逻辑处理更新
+	return b.base.Update(table, stmt, txn, b.getVisibleRow, b.base.convertToCell, b.base.evaluateExpression, b.evaluateWhereCondition)
 }
 
 // Delete 删除符合条件的行
@@ -1773,35 +1326,8 @@ func (b *MemoryBackend) Delete(databaseName string, stmt *ast.DeleteStatement, t
 		return fmt.Errorf("table '%s' doesn't exist in database '%s'", stmt.TableName, databaseName)
 	}
 
-	// 找出要删除的行
-	rowsToDelete := make([]int, 0)
-	for i := range table.Rows {
-		// 获取可见行数据
-		visibleRow := b.getVisibleRow(table.Rows[i], txn)
-		if visibleRow == nil {
-			continue
-		}
-
-		if stmt.Where != nil {
-			// 评估WHERE条件
-			result, err := evaluateWhereCondition(stmt.Where, visibleRow, table.Columns)
-			if err != nil {
-				return err
-			}
-			if !result {
-				continue
-			}
-		}
-		rowsToDelete = append(rowsToDelete, i)
-	}
-
-	// 从后向前删除行，以避免索引变化
-	for i := len(rowsToDelete) - 1; i >= 0; i-- {
-		rowIndex := rowsToDelete[i]
-		table.Rows = append(table.Rows[:rowIndex], table.Rows[rowIndex+1:]...)
-	}
-
-	return nil
+	// 使用通用逻辑处理删除
+	return b.base.Delete(table, stmt, txn, b.getVisibleRow, b.evaluateWhereCondition)
 }
 
 // DropTable 删除表
@@ -1894,45 +1420,26 @@ func matchLikePattern(str, pattern string) bool {
 }
 
 // evaluateWhereCondition 评估WHERE条件
-func evaluateWhereCondition(expr ast.Expression, row []Cell, columns []ast.ColumnDefinition) (bool, error) {
+func (b *MemoryBackend) evaluateWhereCondition(expr ast.Expression, row []Cell, columns []ast.ColumnDefinition) (bool, error) {
 	switch e := expr.(type) {
 	case *ast.BinaryExpression:
 		// 获取左操作数的值
-		leftValue, err := getColumnValue(e.Left, row, columns)
+		leftValue, err := b.base.getColumnValue(e.Left, row, columns)
 		if err != nil {
 			return false, err
 		}
 
 		// 获取右操作数的值
-		rightValue, err := getColumnValue(e.Right, row, columns)
+		rightValue, err := b.base.getColumnValue(e.Right, row, columns)
 		if err != nil {
 			return false, err
 		}
 
 		// 根据操作符比较值
-		switch e.Operator {
-		case "=":
-			return compareValues(leftValue, rightValue, "=")
-		case ">":
-			return compareValues(leftValue, rightValue, ">")
-		case "<":
-			return compareValues(leftValue, rightValue, "<")
-		case ">=":
-			return compareValues(leftValue, rightValue, ">=")
-		case "<=":
-			return compareValues(leftValue, rightValue, "<=")
-		case "!=":
-			result, err := compareValues(leftValue, rightValue, "=")
-			if err != nil {
-				return false, err
-			}
-			return !result, nil // 返回相反的结果
-		default:
-			return false, fmt.Errorf("Unknown operator: '%s'", e.Operator)
-		}
+		return b.base.compareValues(leftValue, rightValue, e.Operator)
 	case *ast.LikeExpression:
 		// 获取左操作数的值
-		leftValue, err := getColumnValue(e.Left, row, columns)
+		leftValue, err := b.base.getColumnValue(e.Left, row, columns)
 		if err != nil {
 			return false, err
 		}
@@ -1944,7 +1451,7 @@ func evaluateWhereCondition(expr ast.Expression, row []Cell, columns []ast.Colum
 		}
 
 		// 执行LIKE匹配
-		return matchLikePattern(strValue, e.Pattern), nil
+		return b.base.matchLikePattern(strValue, e.Pattern), nil
 	case *ast.BetweenExpression:
 		// 解析需要比较的字段（between左侧的字段）
 		colIndex, err := getColumnIndex(e.Left.(*ast.Identifier).Value, columns)
@@ -1954,12 +1461,12 @@ func evaluateWhereCondition(expr ast.Expression, row []Cell, columns []ast.Colum
 
 		// 获取列值
 		left := row[colIndex]
-		lower, err := evaluateExpression(e.Low)
+		lower, err := b.base.evaluateExpression(e.Low)
 		if err != nil {
 			return false, err
 		}
 
-		upper, err := evaluateExpression(e.High)
+		upper, err := b.base.evaluateExpression(e.High)
 		if err != nil {
 			return false, err
 		}
@@ -2046,199 +1553,4 @@ func compareValues(left, right interface{}, operator string) (bool, error) {
 	default:
 		return false, fmt.Errorf("Unknown operator: '%s'", operator)
 	}
-}
-
-// getCellValue 从 Cell 中提取实际值
-func getCellValue(cell Cell) interface{} {
-	switch cell.Type {
-	case CellTypeInt:
-		return cell.IntValue
-	case CellTypeText:
-		return cell.TextValue
-	case CellTypeFloat:
-		return cell.FloatValue
-	case CellTypeDateTime:
-		val, err := time.Parse("2006-01-02 15:04:05", cell.TimeValue)
-		if err != nil {
-			return cell.TimeValue
-		}
-		return val
-	default:
-		return cell.String()
-	}
-}
-
-// 辅助函数：检查是否为数字类型
-func isNumericType(v interface{}) bool {
-	switch v.(type) {
-	case int32, float32:
-		return true
-	default:
-		return false
-	}
-}
-
-// 辅助函数：比较数字类型值
-func compareNumericValues(left, right interface{}, operator string) (bool, error) {
-	// 转换为 float32 进行比较
-	var leftVal, rightVal float32
-
-	switch l := left.(type) {
-	case int32:
-		leftVal = float32(l)
-	case float32:
-		leftVal = l
-	}
-
-	switch r := right.(type) {
-	case int32:
-		rightVal = float32(r)
-	case float32:
-		rightVal = r
-	}
-
-	switch operator {
-	case "=":
-		return leftVal == rightVal, nil
-	case ">":
-		return leftVal > rightVal, nil
-	case "<":
-		return leftVal < rightVal, nil
-	case ">=":
-		return leftVal >= rightVal, nil
-	case "<=":
-		return leftVal <= rightVal, nil
-	case "!=":
-		return leftVal != rightVal, nil
-	default:
-		return false, fmt.Errorf("Unknown operator: '%s'", operator)
-	}
-}
-
-// 辅助函数：判断是否相等
-func isEqual(left, right interface{}) (bool, error) {
-	switch l := left.(type) {
-	case int32:
-		if r, ok := right.(int32); ok {
-			return l == r, nil
-		}
-	case string:
-		if r, ok := right.(string); ok {
-			return l == r, nil
-		}
-	case float32:
-		if r, ok := right.(float32); ok {
-			return l == r, nil
-		}
-	case time.Time:
-		if r, ok := right.(time.Time); ok {
-			return l.Equal(r), nil
-		}
-	}
-	return false, fmt.Errorf("Cannot compare values of different types: %T and %T", left, right)
-}
-
-// 辅助函数：判断是否大于
-func isGreater(left, right interface{}) (bool, error) {
-	switch l := left.(type) {
-	case int32:
-		if r, ok := right.(int32); ok {
-			return l > r, nil
-		}
-	case string:
-		if r, ok := right.(string); ok {
-			return l > r, nil
-		}
-	case float32:
-		if r, ok := right.(float32); ok {
-			return l > r, nil
-		}
-	case time.Time:
-		if r, ok := right.(time.Time); ok {
-			return l.After(r), nil
-		}
-	}
-	return false, fmt.Errorf("Cannot compare values of different types: %T and %T", left, right)
-}
-
-// 辅助函数：判断是否小于
-func isLess(left, right interface{}) (bool, error) {
-	switch l := left.(type) {
-	case int32:
-		if r, ok := right.(int32); ok {
-			return l < r, nil
-		}
-	case string:
-		if r, ok := right.(string); ok {
-			return l < r, nil
-		}
-	case float32:
-		if r, ok := right.(float32); ok {
-			return l < r, nil
-		}
-	case time.Time:
-		if r, ok := right.(time.Time); ok {
-			return l.Before(r), nil
-		}
-	}
-	return false, fmt.Errorf("Cannot compare values of different types: %T and %T", left, right)
-}
-
-// getColumnValue 获取列的值
-func getColumnValue(expr ast.Expression, row []Cell, columns []ast.ColumnDefinition) (interface{}, error) {
-	switch e := expr.(type) {
-	case *ast.Identifier:
-		// 处理表名.列名的形式
-		parts := strings.Split(e.Value, ".")
-		columnName := e.Value
-
-		// 如果有表名前缀，只使用列名部分进行查找
-		if len(parts) == 2 {
-			columnName = parts[1]
-		}
-
-		// 查找列索引
-		for i, col := range columns {
-			if col.Name == columnName {
-				switch row[i].Type {
-				case CellTypeInt:
-					return row[i].IntValue, nil
-				case CellTypeText:
-					return row[i].TextValue, nil
-				case CellTypeFloat:
-					return row[i].FloatValue, nil
-				case CellTypeDateTime:
-					str := row[i].TimeValue
-					val, err := time.Parse("2006-01-02 15:04:05", str)
-					if err != nil {
-						return nil, err
-					}
-					return val, nil
-				default:
-					return nil, fmt.Errorf("Unknown cell type: %v", row[i].Type)
-				}
-			}
-		}
-		return nil, fmt.Errorf("Unknown column '%s' in 'where clause'", e.Value)
-	case *ast.IntegerLiteral:
-		return e.Value, nil // 直接返回已解析的值
-	case *ast.StringLiteral:
-		return e.Value, nil
-	case *ast.FloatLiteral:
-		return e.Value, nil // 直接返回已解析的值
-	case *ast.DateTimeLiteral:
-		return e.Value, nil // 直接返回已解析的值
-	default:
-		return nil, fmt.Errorf("Unknown expression type: %T", expr)
-	}
-}
-
-// getColumnIndex 根据列名获取列索引
-func getColumnIndex(columnName string, columns []ast.ColumnDefinition) (int, error) {
-	for i, col := range columns {
-		if col.Name == columnName {
-			return i, nil
-		}
-	}
-	return -1, fmt.Errorf("column '%s' not found", columnName)
 }
